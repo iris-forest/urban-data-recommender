@@ -1,0 +1,87 @@
+@import './tailwind.css';
+@import './theme.css';
+
+@layer components {
+  .loading-status-roll {
+    position: relative;
+    width: min(26rem, calc(100vw - 3rem));
+    min-height: 3.25rem;
+    overflow: hidden;
+    text-align: center;
+  }
+
+  .loading-status-roll::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 2;
+    height: 1.45rem;
+    background: linear-gradient(
+      to bottom,
+      rgb(250 250 250 / 0),
+      rgb(250 250 250 / 0.9) 72%,
+      rgb(250 250 250)
+    );
+    pointer-events: none;
+  }
+
+  .loading-status-roll__item {
+    position: absolute;
+    top: 0.25rem;
+    right: 0;
+    left: 0;
+    color: rgb(64 64 64);
+    font-weight: 500;
+    line-height: 1.5rem;
+  }
+
+  .loading-status-roll__item--current {
+    z-index: 1;
+    animation: loading-status-roll-in 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  .loading-status-roll__item--previous {
+    animation: loading-status-roll-out 720ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+}
+
+@keyframes loading-status-roll-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-115%);
+  }
+
+  60% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes loading-status-roll-out {
+  0% {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+
+  100% {
+    opacity: 0;
+    filter: blur(1px);
+    transform: translateY(1.85rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-status-roll__item--current {
+    animation: none;
+  }
+
+  .loading-status-roll__item--previous {
+    display: none;
+  }
+}

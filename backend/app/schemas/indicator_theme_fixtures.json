@@ -1,0 +1,34 @@
+[
+  {
+    "indicator_text": "Share of residents within five minutes walking distance from a bus stop in Madrid neighborhoods",
+    "expected_themes": ["accessibility_proximity", "transport_networks", "population"]
+  },
+  {
+    "indicator_text": "Average monthly rent burden for households by Madrid district",
+    "expected_themes": ["housing_affordability", "population"]
+  },
+  {
+    "indicator_text": "Annual nitrogen dioxide exposure near schools and homes in Madrid",
+    "expected_themes": ["air_quality", "education", "housing_affordability"]
+  },
+  {
+    "indicator_text": "Unemployment rate for residents by neighborhood and commuting access to public transport",
+    "expected_themes": ["employment", "population", "transport_networks"]
+  },
+  {
+    "indicator_text": "Access to hospitals and clinics for elderly residents by Madrid district",
+    "expected_themes": ["health", "accessibility_proximity", "population"]
+  },
+  {
+    "indicator_text": "Green space area per resident within low-emission zones by district, for the last 12 months.",
+    "expected_themes": ["green_space", "air_quality", "population"]
+  },
+  {
+    "indicator_text": "Urban heat exposure near schools and parks by district in 2024.",
+    "expected_themes": ["heat_exposure", "education", "green_space"]
+  },
+  {
+    "indicator_text": "Water management and green spaces by district",
+    "expected_themes": ["water_management", "green_space"]
+  }
+]

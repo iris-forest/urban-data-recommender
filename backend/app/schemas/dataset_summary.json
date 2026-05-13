@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DatasetSummary",
+  "type": "object",
+  "required": ["id", "title"],
+  "properties": {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+    "source": {"type": "string"},
+    "source_url": {"type": "string", "format": "uri"},
+    "columns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "inferred_type": {"type": "string"},
+          "description": {"type": "string"}
+        }
+      }
+    },
+    "sample_rows": {
+      "type": "array",
+      "items": {"type": "object"}
+    },
+    "geo_coverage": {"type": ["object", "null"]},
+    "time_coverage": {"type": ["object", "null"]},
+    "license": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "risk_notes": {"type": "array", "items": {"type": "string"}},
+    "recommended_usage": {"type": "array", "items": {"type": "string"}},
+    "embedding": {"type": ["array", "null"], "items": {"type": "number"}},
+    "file_link": {"type": "string"},
+    "schema_version": {"type": "string"},
+    "active": {"type": "boolean"},
+    "last_updated": {"type": "string"},
+    "match_reasons": {"type": "array", "items": {"type": "string"}},
+    "size_bytes": {"type": ["integer", "null"]}
+  },
+  "additionalProperties": false
+}

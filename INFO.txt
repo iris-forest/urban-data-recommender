@@ -1,0 +1,5 @@
+This folder was produced by ../assemble_repo.sh
+- frontend: contains the minimal Figma frontend (src + package.json)
+- backend: contains the DML_prototype app and requirements.txt
+- docs: contains explanations for each section
+Run 'pnpm install' in the frontend and 'pip install -r requirements.txt' in the backend to install dependencies.
