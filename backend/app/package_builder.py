@@ -13,6 +13,11 @@ import zipfile
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .catalog import load_persisted_summaries
+from .dataset_metadata import (
+    dataset_resources,
+    infer_dataset_data_types,
+    infer_dataset_provenance,
+)
 from .models import DatasetSummary, Dataset
 
 
@@ -54,8 +59,15 @@ def _quality_payload(dataset: Dataset) -> Dict[str, float]:
     }
 
 
-def _manifest_entry(summary: DatasetSummary, dataset: Optional[Dataset]) -> Dict[str, object]:
+def _manifest_entry(
+    summary: DatasetSummary,
+    dataset: Optional[Dataset],
+    dataset_notes: Optional[Dict[str, str]] = None,
+) -> Dict[str, object]:
     entry: Dict[str, object] = asdict(summary)
+    note = (dataset_notes or {}).get(summary.id, "").strip()
+    if note:
+        entry["domain_knowledge_note"] = note
     if dataset is None:
         return entry
 
@@ -73,6 +85,9 @@ def _manifest_entry(summary: DatasetSummary, dataset: Optional[Dataset]) -> Dict
             "source": dataset.source,
             "source_url": dataset.api_url or summary.source_url,
             "formats": dataset.formats,
+            "resources": dataset_resources(dataset),
+            "provenance": infer_dataset_provenance(dataset),
+            "data_types": infer_dataset_data_types(dataset),
             "access_type": dataset.access_type,
             "columns": dataset.schema_fields or summary.columns,
             "sample_rows": dataset.sample_preview or summary.sample_rows,
@@ -163,6 +178,8 @@ def _summary_to_readme(summary: DatasetSummary, dataset: Optional[Dataset] = Non
             f"- Resolution: {dataset.spatial_resolution}",
             f"- Update frequency: {dataset.update_frequency}",
             f"- Access type: {dataset.access_type}",
+            f"- Provenance: {infer_dataset_provenance(dataset)}",
+            f"- Data type tags: {', '.join(infer_dataset_data_types(dataset))}",
             f"- Quality: completeness={quality['completeness']}, timeliness={quality['timeliness']}, consistency={quality['consistency']}, documentation={quality['documentation']}",
         ])
 
@@ -189,11 +206,17 @@ def _resolve_summaries(dataset_ids: Sequence[str]) -> List[Tuple[DatasetSummary,
 def build_dataset_package(
     dataset_ids: Sequence[str],
     package_name: str = "urban-planner-dataset-package",
+    dataset_notes: Optional[Dict[str, str]] = None,
 ) -> bytes:
     """Build an in-memory zip archive for the selected dataset ids."""
     buffer = BytesIO()
     resolved = _resolve_summaries(dataset_ids)
-    manifest = build_package_manifest(dataset_ids, package_name=package_name, resolved=resolved)
+    manifest = build_package_manifest(
+        dataset_ids,
+        package_name=package_name,
+        resolved=resolved,
+        dataset_notes=dataset_notes,
+    )
 
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -227,13 +250,17 @@ def build_package_manifest(
     dataset_ids: Sequence[str],
     package_name: str = "urban-planner-dataset-package",
     resolved: Optional[List[Tuple[DatasetSummary, Optional[Dataset]]]] = None,
+    dataset_notes: Optional[Dict[str, str]] = None,
 ) -> Dict[str, object]:
     """Build the JSON manifest used by both zip and standalone JSON export."""
     resolved = resolved if resolved is not None else _resolve_summaries(dataset_ids)
     return {
         "package_name": package_name,
         "dataset_count": len(resolved),
-        "datasets": [_manifest_entry(summary, dataset) for summary, dataset in resolved],
+        "datasets": [
+            _manifest_entry(summary, dataset, dataset_notes=dataset_notes)
+            for summary, dataset in resolved
+        ],
     }
 
 
@@ -241,6 +268,7 @@ def build_package_for_query(
     dataset_ids: Optional[Sequence[str]] = None,
     query: str = "",
     limit: int = 5,
+    dataset_notes: Optional[Dict[str, str]] = None,
 ) -> Tuple[bytes, List[str]]:
     """Build a package from explicit dataset ids or from a semantic search query."""
     resolved_ids: List[str] = []
@@ -254,5 +282,5 @@ def build_package_for_query(
         matches = semantic_search_summaries(query, summaries, limit=limit)
         resolved_ids = [match.summary.id for match in matches]
 
-    archive = build_dataset_package(resolved_ids)
+    archive = build_dataset_package(resolved_ids, dataset_notes=dataset_notes)
     return archive, resolved_ids

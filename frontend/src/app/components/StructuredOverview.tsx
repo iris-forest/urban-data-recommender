@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { ArrowLeft, ArrowRight, MapPin, Calendar, Users, Check, Plus } from "lucide-react";
 import { appStore } from "../store";
 import { IndicatorRequest, DataTheme } from "../types";
 import { formatGeographicLevel } from "../geographyDisplay";
+import { formatThemeName } from "../themeTaxonomy";
 import {
   inferClientPopulationFromIndicator,
   inferClientTimeFrameFromIndicator,
@@ -66,8 +68,10 @@ export function StructuredOverview() {
     });
   };
 
-  const recommendedThemes = allThemes.filter((t) => t.recommended);
-  const optionalThemes = allThemes.filter((t) => !t.recommended);
+  const sortedThemes = [...allThemes].sort((a, b) => {
+    if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+    return formatThemeName(a.name).localeCompare(formatThemeName(b.name));
+  });
   const displayedPopulation = request
     ? request.population || inferClientPopulationFromIndicator(request.description) || "Not specified"
     : "";
@@ -85,16 +89,16 @@ export function StructuredOverview() {
       <div className="max-w-5xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="bg-white rounded-lg shadow-sm border border-neutral-200 p-6">
-          <h1 className="text-2xl mb-2">Structured Overview</h1>
-          <p className="text-neutral-600">
-            Your indicator has been analyzed and broken down into required components.
-          </p>
+            <h1 className="text-2xl mb-2">Planning Measure Overview</h1>
+            <p className="text-neutral-600">
+            Your planning question has been broken down into data themes and context needed for dataset matching.
+            </p>
         </div>
 
         {/* Original Request */}
         <Card>
           <CardHeader>
-            <CardTitle>Your Indicator</CardTitle>
+            <CardTitle>Your Planning Question</CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-neutral-700 italic">"{request.description}"</p>
@@ -104,7 +108,7 @@ export function StructuredOverview() {
         {/* Parsed Components */}
         <Card>
           <CardHeader>
-            <CardTitle>Required Components</CardTitle>
+            <CardTitle>Planning Context</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -143,93 +147,51 @@ export function StructuredOverview() {
               </span>
             </div>
             <p className="text-sm text-neutral-600">
-              Recommended themes are pre-selected. Click to add or remove.
+              Select the data themes that should guide dataset matching. Recommended themes are pre-selected from your planning question.
             </p>
           </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Recommended Themes */}
-            <div className="space-y-2">
-              <h3 className="text-xs uppercase tracking-wide text-neutral-500 font-medium">
-                Recommended
-              </h3>
-              <div className="space-y-2">
-                {recommendedThemes.map((theme, idx) => (
+          <CardContent className="space-y-2">
+            {sortedThemes.map((theme) => (
+              <button
+                key={theme.name}
+                type="button"
+                className={`w-full cursor-pointer rounded-lg border-2 p-3 text-left transition-all ${
+                  selectedThemeNames.has(theme.name)
+                    ? "border-blue-600 bg-blue-50"
+                    : theme.recommended
+                      ? "border-neutral-200 bg-white hover:border-blue-400"
+                      : "border-neutral-200 bg-white hover:border-neutral-300"
+                }`}
+                onClick={() => toggleTheme(theme.name)}
+              >
+                <div className="flex items-start gap-3">
                   <div
-                    key={idx}
-                    className={`cursor-pointer rounded-lg border-2 p-3 transition-all ${
+                    className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
                       selectedThemeNames.has(theme.name)
-                        ? "border-blue-600 bg-blue-50"
-                        : "border-neutral-200 hover:border-blue-400 bg-white"
+                        ? "bg-blue-600 border-blue-600"
+                        : "border-neutral-300"
                     }`}
-                    onClick={() => toggleTheme(theme.name)}
                   >
-                    <div className="flex items-start gap-3">
-                      <div
-                        className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                          selectedThemeNames.has(theme.name)
-                            ? "bg-blue-600 border-blue-600"
-                            : "border-neutral-300"
-                        }`}
-                      >
-                        {selectedThemeNames.has(theme.name) && (
-                          <Check className="w-2.5 h-2.5 text-white" />
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="font-medium text-sm">{formatThemeName(theme.name)}</p>
-                        <p className="text-xs text-neutral-600 mt-0.5">
-                          {theme.explanation}
-                        </p>
-                      </div>
-                    </div>
+                    {selectedThemeNames.has(theme.name) ? (
+                      <Check className="w-2.5 h-2.5 text-white" />
+                    ) : (
+                      <Plus className="w-2.5 h-2.5 text-neutral-400" />
+                    )}
                   </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Optional Themes */}
-            {optionalThemes.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-xs uppercase tracking-wide text-neutral-500 font-medium">
-                  Optional
-                </h3>
-                <div className="space-y-2">
-                  {optionalThemes.map((theme, idx) => (
-                    <div
-                      key={idx}
-                      className={`cursor-pointer rounded-lg border-2 p-3 transition-all ${
-                        selectedThemeNames.has(theme.name)
-                          ? "border-blue-600 bg-blue-50"
-                          : "border-neutral-200 hover:border-neutral-300 bg-white"
-                      }`}
-                      onClick={() => toggleTheme(theme.name)}
-                    >
-                      <div className="flex items-start gap-3">
-                        <div
-                          className={`w-4 h-4 rounded border-2 flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                            selectedThemeNames.has(theme.name)
-                              ? "bg-blue-600 border-blue-600"
-                              : "border-neutral-300"
-                          }`}
-                        >
-                          {selectedThemeNames.has(theme.name) ? (
-                            <Check className="w-2.5 h-2.5 text-white" />
-                          ) : (
-                            <Plus className="w-2.5 h-2.5 text-neutral-400" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-medium text-sm">{formatThemeName(theme.name)}</p>
-                          <p className="text-xs text-neutral-600 mt-0.5">
-                            {theme.explanation}
-                          </p>
-                        </div>
-                      </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium text-sm">{formatThemeName(theme.name)}</p>
+                      {theme.recommended && (
+                        <Badge variant="secondary" className="text-[11px]">
+                          Recommended
+                        </Badge>
+                      )}
                     </div>
-                  ))}
+                    <p className="text-xs text-neutral-600 mt-0.5">{theme.explanation}</p>
+                  </div>
                 </div>
-              </div>
-            )}
+              </button>
+            ))}
           </CardContent>
         </Card>
 
@@ -248,7 +210,7 @@ export function StructuredOverview() {
             className="flex-1 gap-2"
             disabled={selectedThemeNames.size === 0}
           >
-            Search for Datasets
+            Search for Matching Datasets
             <ArrowRight className="w-4 h-4" />
           </Button>
         </div>
@@ -265,10 +227,6 @@ export function StructuredOverview() {
       </div>
     </div>
   );
-}
-
-function formatThemeName(themeId: string): string {
-  return formatDisplayName(themeId);
 }
 
 function getOptionalSupportThemes(
@@ -360,7 +318,7 @@ function getThemeHelpDescription(themeId: string, request: IndicatorRequest): st
         return "Helps show whether clinics, hospitals, or primary care are nearby.";
       }
       return hints.mentionsWalkingAccess
-        ? "Helps use the walking time or distance named in the indicator."
+        ? "Helps use the walking time or distance named in the planning question."
         : "Helps find public facilities and services people may need nearby.";
     case "transport_networks":
       return hints.mentionsCycling
@@ -385,7 +343,7 @@ function getThemeHelpDescription(themeId: string, request: IndicatorRequest): st
       return "Adds water, drainage, irrigation, flood, or wastewater data.";
     case "air_quality":
       return hints.mentionsLowEmissionZone
-        ? `Identifies low-emission zones so results can match the zones in the indicator.`
+        ? `Identifies low-emission zones so results can match the zones in the planning question.`
         : `Adds pollution or emissions data for comparison${timeClause}.`;
     case "heat_exposure":
       return `Adds heat and temperature data for comparison${timeClause}.`;
@@ -408,7 +366,7 @@ function getThemeHelpDescription(themeId: string, request: IndicatorRequest): st
         ? "Adds school locations, areas served by schools, or student counts."
         : "Adds schools, students, or education facilities.";
     default:
-      return `Helps find datasets related to ${formatThemeName(themeId).toLowerCase()} for this indicator.`;
+      return `Helps find datasets related to ${formatThemeName(themeId).toLowerCase()} for this planning question.`;
   }
 }
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +29,26 @@ class RecommendRequest(BaseModel):
     extracted_themes: Optional[List[str]] = Field(None, description="Pre-extracted themes (optional)")
 
 
+class DatasetResource(BaseModel):
+    """Linkable source resource metadata exposed to the UI."""
+
+    id: str = ""
+    name: str
+    description: str = ""
+    format: str = ""
+    url: str
+
+
+class CompatibilityEvidence(BaseModel):
+    """Explainable compatibility evidence for the planning question."""
+
+    matched_concepts: List[str] = Field(default_factory=list)
+    missing_concepts: List[str] = Field(default_factory=list)
+    geography: str = ""
+    time: str = ""
+    summary: str = ""
+
+
 class DatasetItem(BaseModel):
     """Simplified dataset for API responses."""
 
@@ -39,6 +59,7 @@ class DatasetItem(BaseModel):
     provider: str
     themes: List[str]
     matching_themes: List[str] = Field(default_factory=list)
+    focused_matching_themes: List[str] = Field(default_factory=list)
     spatial_coverage: str
     spatial_resolution: str
     update_frequency: str
@@ -52,6 +73,11 @@ class DatasetItem(BaseModel):
     description_en: str = ""
     reason_recommended: Optional[str] = None
     relevance_score: Optional[float] = None
+    compatibility_score: Optional[float] = None
+    compatibility_reason: Optional[str] = None
+    semantic_score: Optional[float] = None
+    compatibility_band: Optional[Literal["strong", "partial", "weak"]] = None
+    compatibility_evidence: Optional[CompatibilityEvidence] = None
     is_essential: bool = False
     source: Optional[str] = None
     api_url: Optional[str] = None
@@ -61,6 +87,9 @@ class DatasetItem(BaseModel):
     category_method: Optional[str] = None
     schema_fields: Optional[List[Dict[str, str]]] = None
     preview_available: bool = False
+    resources: List[DatasetResource] = Field(default_factory=list)
+    provenance: Optional[str] = None
+    data_types: List[str] = Field(default_factory=list)
 
 
 class RecommendResponse(BaseModel):
@@ -69,6 +98,7 @@ class RecommendResponse(BaseModel):
     recommendations: List[DatasetItem]
     data_gaps: List[Dict] = Field(default_factory=list, description="Identified data gaps")
     quality_risks: List[Dict] = Field(default_factory=list, description="Data quality risks")
+    debug_trace: List[str] = Field(default_factory=list, description="Recommendation pipeline debug trace")
 
 
 class DatasetCatalogResponse(BaseModel):
@@ -112,6 +142,55 @@ class DatasetFitColumnInsight(BaseModel):
     notes: str = ""
 
 
+class EdaCheckItem(BaseModel):
+    id: str
+    status: str = "unknown"
+    message: str = ""
+
+
+class EdaColumnProfile(BaseModel):
+    name: str
+    inferred_type: str = "unknown"
+    missing_count: int = 0
+    missing_pct: float = 0.0
+    placeholder_count: int = 0
+    distinct_count: int = 0
+    sample_values: List[str] = Field(default_factory=list)
+    flags: List[str] = Field(default_factory=list)
+
+
+class PreviewSample(BaseModel):
+    columns: List[Dict[str, Any]] = Field(default_factory=list)
+    rows: List[Dict[str, Any]] = Field(default_factory=list)
+    source_url: str = ""
+    preview_source: str = "none"
+
+
+class EdaProfile(BaseModel):
+    rows_analyzed: int = 0
+    columns_analyzed: int = 0
+    preview_rows_requested: int = 5
+    metadata_only: bool = False
+    preview_source: str = "none"
+    preview_stats: Dict[str, Any] = Field(default_factory=dict)
+    column_profiles: List[EdaColumnProfile] = Field(default_factory=list)
+    profile_notes: List[str] = Field(default_factory=list)
+
+
+class EdaFit(BaseModel):
+    roles_found: List[str] = Field(default_factory=list)
+    roles_missing: List[str] = Field(default_factory=list)
+    join_keys: List[str] = Field(default_factory=list)
+    time_fields: List[str] = Field(default_factory=list)
+    geo_fields: List[str] = Field(default_factory=list)
+
+
+class EdaInterpretation(BaseModel):
+    readiness_band: str = "unknown"
+    quality_checks: List[EdaCheckItem] = Field(default_factory=list)
+    synthesis: str = ""
+
+
 class DatasetFitInsight(BaseModel):
     dataset_id: str
     title: str
@@ -119,6 +198,8 @@ class DatasetFitInsight(BaseModel):
     formats: List[str] = Field(default_factory=list)
     source_url: str = ""
     fit_score: int = Field(0, ge=0, le=100)
+    quality_score: int = Field(0, ge=0, le=100)
+    quality_band: str = "limited"
     recommended_role: str = "supporting"
     fit_summary: str = ""
     useful_columns: List[DatasetFitColumnInsight] = Field(default_factory=list)
@@ -129,6 +210,10 @@ class DatasetFitInsight(BaseModel):
     geo_fields: List[str] = Field(default_factory=list)
     quality_risks: List[str] = Field(default_factory=list)
     recommended_next_action: str = ""
+    eda_profile: EdaProfile = Field(default_factory=EdaProfile)
+    eda_fit: EdaFit = Field(default_factory=EdaFit)
+    eda_interpretation: EdaInterpretation = Field(default_factory=EdaInterpretation)
+    preview_sample: Optional[PreviewSample] = None
 
 
 class CrossDatasetFitSummary(BaseModel):
@@ -185,6 +270,10 @@ class PackageCreateRequest(BaseModel):
     dataset_ids: Optional[List[str]] = Field(None, description="Selected dataset ids to package")
     query: Optional[str] = Field(None, description="Fallback semantic query if dataset ids are not supplied")
     limit: int = Field(5, ge=1, le=20, description="Maximum number of datasets when using query fallback")
+    dataset_notes: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional user-authored domain knowledge notes keyed by dataset id",
+    )
 
 
 class EnrichSummariesRequest(BaseModel):
@@ -218,6 +307,10 @@ class ClearImportSourceResponse(BaseModel):
     requested_source: Optional[ImportSource] = None
     mapped_source: Optional[str] = None
     dataset_ids: List[str]
+
+
+class CancelBackgroundJobsResponse(BaseModel):
+    cancelled_sources: List[str] = Field(default_factory=list)
 
 
 class FullCatalogImportProgressResponse(BaseModel):

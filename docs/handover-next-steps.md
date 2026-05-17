@@ -213,6 +213,103 @@ Testing:
 - Manually verify the first-page copy, dataset detail page order, fit review grouping, loading bar, and sticky next-step button.
 - Check that the access label, export summary text, and file links are understandable without extra context.
 
+## Main TODO 8: "Why This Score?" Explanatory Panels On Detail Page
+
+Goal: Replace the generic quality summary and quality screening details on the dataset detail page with a comprehensive explanatory panel that shows which specific criteria contribute to the overall quality score. This makes the scoring transparent while acknowledging that the score is just one perspective on data value.
+
+Suggested product behavior:
+
+- On `DatasetDetailPanel`, replace the current "Quality 80%" summary and "Data Screening" details section with a new "How This Score Is Calculated" panel.
+- Show completeness as one of several scoring factors (not the only one).
+- Include other factors such as: completeness, documentation quality, schema clarity, update frequency/freshness, and access availability.
+- Display each factor with a brief explanation and visual indicator (bar, stars, or badge) showing its contribution.
+- Add a disclaimer note such as: "This quality score reflects technical and structural qualities. Consider community trust, domain relevance, data provenance, and qualitative insights when making your final decision."
+- Keep the panel concise and scannable; consider collapsible sub-sections for detailed explanations.
+
+Implementation outline:
+
+- In `frontend/src/app/components/DatasetDetailPanel.tsx`, locate the quality/screening display section.
+- Create a new component or helper, for example `QualityScoreBreakdown`, that renders the scoring factors.
+- Extend `frontend/src/app/types.ts` or use backend response fields to carry individual factor scores (completeness, documentation, etc.).
+- If needed, update `backend/app/api_schemas.py` to return a structured quality breakdown in the dataset response.
+- Add backend logic in `backend/app/models.py` or similar to compute individual quality factors (if not already present).
+- Style the panel with a calm, informational tone (not alarming), perhaps with a soft background or border.
+
+Testing:
+
+- Run `pnpm build`.
+- Manually verify that the score breakdown appears on several datasets with different quality levels.
+- Confirm that the disclaimer note is readable and sets the right expectations.
+- Verify that completeness is shown as one factor, not the only factor.
+
+## Main TODO 9: Dataset Provenance & Type Tags
+
+Goal: Add visible badges and tags to each dataset indicating its origin (source type) and data nature so users recognize that valuable datasets may fall outside typical "high-quality" scoring patterns (e.g., community-generated or qualitative data).
+
+Suggested product behavior:
+
+- Display provenance tags near the dataset title or in the header of `DatasetDetailPanel` and dataset cards in `DatasetResults`.
+- Examples of provenance tags:
+  - `Official Government`
+  - `Community-Generated`
+  - `Research Organization`
+  - `Participatory Data`
+  - `Non-Profit / NGO`
+- Examples of data-nature tags:
+  - `Quantitative`
+  - `Qualitative`
+  - `Mixed Methods`
+  - `Survey Data`
+  - `Crowdsourced`
+- Use distinct colors or visual styles to differentiate provenance from data nature.
+- Include a small info tooltip on hover explaining what each tag means.
+
+Implementation outline:
+
+- Extend `backend/app/api_schemas.py` with optional fields such as `provenance` (string) and `data_types` (list of strings).
+- Update backend dataset models in `backend/app/models.py` to populate these fields from catalog metadata or a new data dictionary.
+- Update `frontend/src/app/types.ts` with the new fields.
+- In `frontend/src/app/components/DatasetCard.tsx` and `DatasetDetailPanel.tsx`, render the tags as Badges with appropriate styling and tooltips.
+- Consider adding a filter option in `DatasetResults` to show/hide datasets by provenance type (integrates with TODO 5 filters).
+
+Testing:
+
+- Run `pnpm build`.
+- Manually verify tags appear on dataset cards and detail pages.
+- Confirm tooltips display helpful explanations.
+- Verify that tags are visually distinct and not cluttered.
+
+## Main TODO 10: "Domain Knowledge Override" Section
+
+Goal: Allow users to add free-form notes or rationales for selecting a dataset despite its quality score, making their critical reasoning and domain knowledge visible in the analysis and supporting more transparent, values-aligned decision-making.
+
+Suggested product behavior:
+
+- On `DatasetFitReview` or the selection page, add a collapsible "Domain Knowledge Notes" section for each selected dataset.
+- Allow users to type free-form text explaining why they chose this dataset (e.g., "Local stakeholders trust this source" or "This captures community perspectives missing in official data").
+- Save these notes in the app state (and optionally to a session or export).
+- Display the notes alongside the dataset in the final overview (`FinalOverview`) and in any exported summary/manifest.
+- Keep the notes visible but de-emphasized so they don't overshadow the technical analysis.
+- Optionally add preset prompts or suggestions such as:
+  - "Why did you include this dataset despite its score?"
+  - "What additional context or domain knowledge influenced this choice?"
+  - "How does this dataset complement the others?"
+
+Implementation outline:
+
+- Extend `appStore` in `frontend/src/app/store.ts` to track domain-knowledge notes per dataset (e.g., `datasetNotes: Map<datasetId, string>`).
+- Add a new component or section in `DatasetResults` or `DatasetFitReview`, for example `DomainKnowledgeNotes`, with a text area and save button.
+- Render the notes section collapsibly below each dataset card in the fit review and final overview.
+- Update the export/summary output to include these notes so users can see their reasoning in reports.
+- Style notes distinctly (e.g., italicized text or a light accent color) to differentiate them from system-generated analysis.
+
+Testing:
+
+- Run `pnpm build`.
+- Manually add and edit notes for several datasets.
+- Verify notes persist across navigation and appear in the final overview.
+- Confirm notes can be exported if an export/summary feature exists.
+
 ## Verification Commands
 
 Run these after changes:

@@ -13,13 +13,14 @@ from functools import lru_cache
 import hashlib
 import math
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from .models import DatasetSummary
 
 
 TOKEN_PATTERN = re.compile(r"[\w\u00C0-\u017F'-]+", re.UNICODE)
 VECTOR_DIMENSION = 256
+SENTENCE_TRANSFORMER_MODEL = "all-MiniLM-L6-v2"
 
 
 def normalize_text(text: str) -> str:
@@ -61,15 +62,19 @@ def summarize_to_text(summary: DatasetSummary) -> str:
 
 
 class _BaseEmbeddingBackend:
+    name = "unknown"
+
     def encode(self, text: str) -> List[float]:
         raise NotImplementedError
 
 
 class _SentenceTransformerBackend(_BaseEmbeddingBackend):
+    name = f"sentence-transformers:{SENTENCE_TRANSFORMER_MODEL}"
+
     def __init__(self) -> None:
         from sentence_transformers import SentenceTransformer  # type: ignore
 
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.model = SentenceTransformer(SENTENCE_TRANSFORMER_MODEL)
 
     def encode(self, text: str) -> List[float]:
         vector = self.model.encode([text], normalize_embeddings=True)[0]
@@ -77,6 +82,8 @@ class _SentenceTransformerBackend(_BaseEmbeddingBackend):
 
 
 class _HashedEmbeddingBackend(_BaseEmbeddingBackend):
+    name = "hashed-vector-fallback"
+
     def __init__(self, dimension: int = VECTOR_DIMENSION) -> None:
         self.dimension = dimension
 
@@ -102,6 +109,10 @@ def get_embedding_backend() -> _BaseEmbeddingBackend:
         return _SentenceTransformerBackend()
     except Exception:
         return _HashedEmbeddingBackend()
+
+
+def get_embedding_backend_name() -> str:
+    return get_embedding_backend().name
 
 
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:

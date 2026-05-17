@@ -5,17 +5,16 @@ Madrid CKAN and datos.gob.es sources are merged and deduplicated.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Config
 from .models import Dataset, DatasetSummary
 from .storage import read_normalized_dataset_cache
 from .themes import load_theme_glossary
-from .domain.theme_matching import infer_dataset_theme_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +35,37 @@ SEARCH_STOPWORDS = {
     "within",
     "with",
 }
+_DATASET_SEARCH_RECORD_CACHE_MAX = 100_000
+
+
+@dataclass(frozen=True, slots=True)
+class _DatasetSearchRecord:
+    blob: str
+    title_blob: str
+    blob_tokens: frozenset[str]
+    title_tokens: frozenset[str]
+    dataset_themes: frozenset[str]
+    quality_score: float
+    recency_bonus: float
+
+
+_DATASET_SEARCH_RECORD_CACHE: Dict[int, Tuple[Tuple[Any, ...], _DatasetSearchRecord]] = {}
 
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").lower()).strip()
 
 
-def _dataset_search_blob(dataset: Dataset) -> str:
+def _dataset_category_names(dataset: Dataset) -> List[str]:
     category_names = []
     for category in dataset.categories:
         if isinstance(category, dict):
             category_names.extend(category.keys())
+    return category_names
+
+
+def _dataset_search_blob(dataset: Dataset, category_names: Optional[Sequence[str]] = None) -> str:
+    category_names = list(category_names) if category_names is not None else _dataset_category_names(dataset)
 
     parts = [
         dataset.title,
@@ -63,9 +82,63 @@ def _dataset_search_blob(dataset: Dataset) -> str:
     return _normalize_text(" ".join(part for part in parts if part))
 
 
-def _term_matches_blob(term: str, blob: str) -> bool:
+def _dataset_search_fingerprint(dataset: Dataset, category_names: Sequence[str]) -> Tuple[Any, ...]:
+    return (
+        dataset.dataset_id,
+        dataset.title,
+        dataset.description,
+        dataset.provider,
+        dataset.primary_category,
+        dataset.spatial_coverage,
+        dataset.spatial_resolution,
+        dataset.update_frequency,
+        dataset.last_updated,
+        tuple(dataset.themes or []),
+        tuple(category_names),
+        dataset.source,
+    )
+
+
+def _dataset_search_record(dataset: Dataset) -> _DatasetSearchRecord:
+    """Return cached searchable text/tokens for one catalog row."""
+    category_names = _dataset_category_names(dataset)
+    fingerprint = _dataset_search_fingerprint(dataset, category_names)
+    cache_key = id(dataset)
+    cached = _DATASET_SEARCH_RECORD_CACHE.get(cache_key)
+    if cached and cached[0] == fingerprint:
+        return cached[1]
+
+    blob = _dataset_search_blob(dataset, category_names)
+    title_blob = _normalize_text(dataset.title)
+    quality_score = 0.0
+    if dataset.quality:
+        quality_score = (
+            dataset.quality.completeness
+            + dataset.quality.timeliness
+            + dataset.quality.consistency
+            + dataset.quality.documentation
+        ) / 4.0
+    recency_bonus = 0.2 if dataset.last_updated and dataset.last_updated >= "2025-01-01" else 0.0
+    record = _DatasetSearchRecord(
+        blob=blob,
+        title_blob=title_blob,
+        blob_tokens=frozenset(re.findall(r"[\w.-]+", blob)),
+        title_tokens=frozenset(re.findall(r"[\w.-]+", title_blob)),
+        dataset_themes=frozenset(dataset.themes or []),
+        quality_score=quality_score,
+        recency_bonus=recency_bonus,
+    )
+    if len(_DATASET_SEARCH_RECORD_CACHE) > _DATASET_SEARCH_RECORD_CACHE_MAX:
+        _DATASET_SEARCH_RECORD_CACHE.clear()
+    _DATASET_SEARCH_RECORD_CACHE[cache_key] = (fingerprint, record)
+    return record
+
+
+def _term_matches_blob(term: str, blob: str, token_set: Optional[AbstractSet[str]] = None) -> bool:
     if " " in term:
         return term in blob
+    if token_set is not None:
+        return term in token_set
     return bool(re.search(rf"\b{re.escape(term)}\b", blob))
 
 
@@ -142,36 +215,23 @@ def _score_dataset_against_terms(
     search_terms: Sequence[str],
     extracted_themes: Optional[Sequence[str]] = None,
 ) -> float:
-    blob = _dataset_search_blob(dataset)
-    title_blob = _normalize_text(dataset.title)
+    record = _dataset_search_record(dataset)
     theme_set = set(extracted_themes or [])
-    dataset_theme_set = set(dataset.themes or [])
 
-    term_hits = sum(1 for term in search_terms if _term_matches_blob(term, blob))
-    title_hits = sum(1 for term in search_terms if _term_matches_blob(term, title_blob))
-    direct_theme_overlap = theme_set.intersection(dataset_theme_set)
-    inferred_theme_overlap = infer_dataset_theme_overlap(dataset, theme_set.difference(dataset_theme_set))
-    theme_overlap = len(direct_theme_overlap.union(inferred_theme_overlap))
-
-    quality_score = 0.0
-    if dataset.quality:
-        quality_score = (
-            dataset.quality.completeness
-            + dataset.quality.timeliness
-            + dataset.quality.consistency
-            + dataset.quality.documentation
-        ) / 4.0
-
-    recency_bonus = 0.0
-    if dataset.last_updated:
-        recency_bonus = 0.2 if dataset.last_updated >= "2025-01-01" else 0.0
+    term_hits = sum(1 for term in search_terms if _term_matches_blob(term, record.blob, record.blob_tokens))
+    title_hits = sum(1 for term in search_terms if _term_matches_blob(term, record.title_blob, record.title_tokens))
+    # Query-time ranking scans the full cached catalog. Use the stored theme
+    # labels and search terms here; deeper metadata inference runs only for the
+    # shortlisted candidates before they are returned to the UI.
+    direct_theme_overlap = theme_set.intersection(record.dataset_themes)
+    theme_overlap = len(direct_theme_overlap)
 
     return (
         (term_hits * 0.45)
         + (title_hits * 0.75)
         + (theme_overlap * 2.0)
-        + (quality_score * 0.5)
-        + recency_bonus
+        + (record.quality_score * 0.5)
+        + record.recency_bonus
     )
 
 
@@ -195,6 +255,14 @@ def _load_cache_by_source() -> Tuple[List[Dataset], set[str]]:
             cached_sources.add(source)
 
     return cached, cached_sources
+
+
+def warm_catalog_search_index() -> int:
+    """Precompute reusable search metadata for cached catalog rows."""
+    cached_datasets, _ = _load_cache_by_source()
+    for dataset in cached_datasets:
+        _dataset_search_record(dataset)
+    return len(cached_datasets)
 
 
 def search_relevant_datasets(

@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
-from .catalog_translation import ensure_dataset_translations, ensure_record_translations
+from .catalog_translation import ensure_dataset_translations
 from .models import Dataset, DatasetQuality
 from .theme_mappings import infer_categories_from_themes, infer_primary_category_from_themes
 from .themes import _normalize_text, extract_themes
@@ -65,6 +65,8 @@ LEGACY_POPULATION_EVIDENCE_HINTS = (
     "population",
     "resident",
 )
+
+_NORMALIZED_DATASET_CACHE: Dict[Tuple[Tuple[str, int, int], ...], List[Dataset]] = {}
 
 
 def _safe_cache_component(value: str) -> str:
@@ -184,7 +186,6 @@ def write_normalized_dataset_cache(
 def _dataset_from_cache_record(record: Dict[str, Any]) -> Dataset:
     data = dict(record)
     _repair_legacy_theme_fallback(data)
-    ensure_record_translations(data)
     quality = data.get("quality", {})
     if isinstance(quality, dict):
         data["quality"] = DatasetQuality(
@@ -248,6 +249,11 @@ def read_normalized_dataset_cache(
         normalized_dir = _cache_base(cache_base_dir) / "normalized"
         paths = sorted(normalized_dir.glob("*.jsonl")) if normalized_dir.exists() else []
 
+    signature = _normalized_cache_signature(paths)
+    cached = _NORMALIZED_DATASET_CACHE.get(signature)
+    if cached is not None:
+        return list(cached)
+
     datasets: List[Dataset] = []
     for path in paths:
         if not path.exists():
@@ -265,7 +271,23 @@ def read_normalized_dataset_cache(
             logger.error("Failed to read normalized dataset cache %s: %s", path, e)
             raise
 
+    _NORMALIZED_DATASET_CACHE[signature] = list(datasets)
+    if len(_NORMALIZED_DATASET_CACHE) > 8:
+        for stale_key in list(_NORMALIZED_DATASET_CACHE.keys())[:-8]:
+            _NORMALIZED_DATASET_CACHE.pop(stale_key, None)
     return datasets
+
+
+def _normalized_cache_signature(paths: List[Path]) -> Tuple[Tuple[str, int, int], ...]:
+    """Return a cache key that changes when normalized cache files change."""
+    signature: List[Tuple[str, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        signature.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
 
 
 def read_cache_manifest(cache_base_dir: Optional[Path] = None) -> Dict[str, Any]:

@@ -1,0 +1,156 @@
+[
+  {
+    "name": "metro_accessibility_false_positives",
+    "indicator_text": "Older adults within 800 meters walking distance of metro stations by census tract",
+    "extracted_themes": ["population", "accessibility_proximity"],
+    "theme_confidence": { "population": 1.0, "accessibility_proximity": 1.0 },
+    "candidates": [
+      {
+        "dataset_id": "served_population_bibliobus",
+        "title": "Regional Bibliobus Service. Population served",
+        "description": "Mobile library service usage statistics for population served by bibliobus routes.",
+        "themes": ["population", "air_quality"],
+        "matching_themes": ["population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      },
+      {
+        "dataset_id": "media_access_sports",
+        "title": "Persons accessing sporting events through audiovisual media",
+        "description": "Attendance and audiovisual media access by education level.",
+        "themes": ["accessibility_proximity", "population"],
+        "matching_themes": ["accessibility_proximity", "population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      },
+      {
+        "dataset_id": "economic_activity_parks",
+        "title": "Census of Economic Activity Parks with asbestos",
+        "description": "Business park asbestos inventory by municipality in Madrid.",
+        "themes": ["green_space", "population"],
+        "matching_themes": ["green_space", "population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      },
+      {
+        "dataset_id": "madrid_metro_access",
+        "title": "Madrid metro stations and walking distance accessibility",
+        "description": "Metro station locations, census tract identifiers, and walking distance accessibility for older adults within 800 meters.",
+        "themes": ["accessibility_proximity", "transport_networks", "population"],
+        "matching_themes": ["accessibility_proximity", "population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.85, "timeliness": 0.8, "consistency": 0.75, "documentation": 0.7 }
+      }
+    ],
+    "must_rank_high": ["madrid_metro_access"],
+    "must_not_recommend": [
+      "served_population_bibliobus",
+      "media_access_sports",
+      "economic_activity_parks"
+    ],
+    "max_score_for_must_not": 0.74
+  },
+  {
+    "name": "madrid_vs_spain_air_quality",
+    "indicator_text": "Annual nitrogen dioxide and green space coverage in Madrid districts for 2024",
+    "extracted_themes": ["air_quality", "green_space"],
+    "theme_confidence": { "air_quality": 1.0, "green_space": 0.55 },
+    "candidates": [
+      {
+        "dataset_id": "spain_air_green_context",
+        "title": "Spain national air quality and green context indicators",
+        "description": "Spain-wide air quality monitoring and green area statistics.",
+        "matching_themes": ["air_quality", "green_space"],
+        "spatial_coverage": "Spain",
+        "source": "datos_gob_es",
+        "search_rank": 0,
+        "quality": { "completeness": 0.9, "timeliness": 0.9, "consistency": 0.9, "documentation": 0.9 }
+      },
+      {
+        "dataset_id": "madrid_air_quality",
+        "title": "Madrid Air Quality Monitoring Stations NO2 PM2.5",
+        "description": "Air quality stations in Madrid city with nitrogen dioxide and PM2.5 readings by district.",
+        "matching_themes": ["air_quality"],
+        "spatial_coverage": "Madrid city",
+        "source": "madrid_ckan",
+        "search_rank": 1,
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      },
+      {
+        "dataset_id": "madrid_green_space",
+        "title": "Madrid Green Space Surface Area by District",
+        "description": "Green space and park surface area per district in Madrid city.",
+        "matching_themes": ["green_space"],
+        "spatial_coverage": "Madrid city",
+        "source": "madrid_ckan",
+        "search_rank": 2,
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      }
+    ],
+    "must_rank_high": ["madrid_air_quality", "madrid_green_space"],
+    "must_not_recommend": ["spain_air_green_context"],
+    "max_score_for_must_not": 0.74,
+    "must_rank_before": [
+      ["madrid_air_quality", "spain_air_green_context"],
+      ["madrid_green_space", "spain_air_green_context"]
+    ]
+  },
+  {
+    "name": "bus_stop_accessibility_madrid",
+    "indicator_text": "Share of residents within five minutes walking distance from a bus stop in Madrid neighborhoods",
+    "extracted_themes": ["accessibility_proximity", "transport_networks", "population"],
+    "theme_confidence": {
+      "accessibility_proximity": 1.0,
+      "transport_networks": 1.0,
+      "population": 0.9
+    },
+    "candidates": [
+      {
+        "dataset_id": "madrid_bus_stops",
+        "title": "Madrid bus stops and walking distance by neighborhood",
+        "description": "Bus stop locations, resident population, and walking distance accessibility in Madrid neighborhoods.",
+        "matching_themes": ["accessibility_proximity", "transport_networks", "population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.88, "timeliness": 0.85, "consistency": 0.8, "documentation": 0.75 }
+      },
+      {
+        "dataset_id": "national_mobility_stats",
+        "title": "Spain national mobility and population statistics",
+        "description": "National mobility share and population indicators across Spain.",
+        "matching_themes": ["transport_networks", "population"],
+        "spatial_coverage": "Spain",
+        "quality": { "completeness": 0.85, "timeliness": 0.8, "consistency": 0.75, "documentation": 0.7 }
+      }
+    ],
+    "must_rank_high": ["madrid_bus_stops"],
+    "must_not_recommend": ["national_mobility_stats"],
+    "max_score_for_must_not": 0.74
+  },
+  {
+    "name": "green_space_low_emission_zones",
+    "indicator_text": "Green space area per resident within low-emission zones by district for the last 12 months",
+    "extracted_themes": ["green_space", "population", "air_quality"],
+    "theme_confidence": { "green_space": 1.0, "population": 1.0, "air_quality": 1.0 },
+    "candidates": [
+      {
+        "dataset_id": "madrid_green_low_emission",
+        "title": "Madrid green space in low-emission zones by district",
+        "description": "Green space area per resident within low-emission zones by Madrid district for the last 12 months.",
+        "matching_themes": ["green_space", "air_quality", "population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.85, "timeliness": 0.8, "consistency": 0.75, "documentation": 0.7 }
+      },
+      {
+        "dataset_id": "population_only_generic",
+        "title": "Resident population counts",
+        "description": "Population counts by district without green space or air quality context.",
+        "matching_themes": ["population"],
+        "spatial_coverage": "Madrid city",
+        "quality": { "completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65 }
+      }
+    ],
+    "must_rank_high": ["madrid_green_low_emission"],
+    "must_not_recommend": ["population_only_generic"],
+    "max_score_for_must_not": 0.74
+  }
+]

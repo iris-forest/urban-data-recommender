@@ -1,22 +1,44 @@
 import { useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
-import { X, CheckCircle2, ExternalLink, Loader2, TableProperties, AlertTriangle } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
+  FileText,
+  HelpCircle,
+  Loader2,
+  TableProperties,
+  X,
+} from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "./ui/tooltip";
 import { Dataset } from "../types";
 import { getDatasetPreview, type DatasetPreviewResponse } from "../api";
 import {
-  getCompletenessCoverageLabel,
-  hasCompletenessRisk,
-} from "../qualityDisplay";
+  compatibilityBadgeClass,
+  compatibilityBandLabel,
+  formatCompatibilityScore,
+  formatCompatibilityTooltip,
+  getDatasetCompatibilityScore,
+} from "../compatibilityDisplay";
+import { formatFileTypeLabel, formatFileTypeLabels } from "../fileFormats";
+import { formatThemeName, getDatasetCategoryDisplay } from "../themeTaxonomy";
 
 const DESCRIPTION_PREVIEW_LENGTH = 360;
 
 interface DatasetDetailPanelProps {
   dataset: Dataset;
+  preferredThemeIds?: string[];
   onClose: () => void;
 }
 
-export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps) {
+export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }: DatasetDetailPanelProps) {
   const sourceLabel = formatSourceLabel(dataset.source || "unknown");
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [preview, setPreview] = useState<DatasetPreviewResponse | null>(null);
@@ -58,19 +80,6 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
     };
   }, [dataset.id]);
 
-  const getQualityTags = () => {
-    const tags: string[] = [];
-
-    tags.push(getCompletenessCoverageLabel(dataset.quality.completeness));
-    if (hasCompletenessRisk(dataset.quality.completeness)) tags.push("Review Coverage");
-    if (dataset.quality.documentation === "excellent" || dataset.quality.documentation === "good") {
-      tags.push("Well Documented");
-    }
-    if (dataset.quality.consistency === "high") tags.push("High Quality");
-    
-    return tags;
-  };
-
   const schemaColumns =
     preview?.columns && preview.columns.length > 0
       ? preview.columns
@@ -78,39 +87,87 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
   const previewRows = preview?.rows || [];
   const rowColumnNames = getPreviewColumnNames(schemaColumns.map((column) => column.name), previewRows);
   const previewSourceUrl = preview?.source_url || dataset.apiUrl;
+  const resources = dataset.resources || [];
+  const displayFormats = getDisplayFormats(dataset);
+  const compatibilityScore = getDatasetCompatibilityScore(dataset);
+  const compatibilityTooltip = formatCompatibilityTooltip(dataset);
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-6 z-50">
       <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
-        {/* Header */}
         <div className="sticky top-0 bg-white border-b border-neutral-200 p-6 flex justify-between items-start">
           <div>
-            <div className="flex items-center gap-2 mb-1">
-              <h2 className="text-xl font-semibold">{dataset.name}</h2>
-              {dataset.essential && (
-                <Badge className="bg-blue-600">Essential</Badge>
-              )}
-              <Badge variant="secondary">{dataset.category || "Uncategorized"}</Badge>
-            </div>
-            <p className="text-neutral-600">
+            <h2 className="text-xl font-semibold leading-snug">{dataset.name}</h2>
+            {dataset.essential && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <Badge className="bg-blue-600">Recommended</Badge>
+              </div>
+            )}
+            <p className="mt-2 text-neutral-600">
               {dataset.provider}
-              {dataset.source ? ` - ${dataset.source}` : ""}
+              {dataset.source ? ` - ${sourceLabel}` : ""}
             </p>
           </div>
           <button
             onClick={onClose}
             className="p-2 hover:bg-neutral-100 rounded-lg transition-colors"
+            aria-label="Close dataset details"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Content */}
         <div className="p-6 space-y-6">
-          {/* Description */}
+          <div>
+            <h3 className="font-semibold mb-2">Why This Dataset Matches</h3>
+            <div className="rounded-lg border border-neutral-200 p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline" className={compatibilityBadgeClass(dataset)}>
+                  {compatibilityBandLabel(dataset)} {formatCompatibilityScore(compatibilityScore)}
+                </Badge>
+                {typeof dataset.semanticScore === "number" && (
+                  <Badge variant="secondary">
+                    Semantic {formatCompatibilityScore(dataset.semanticScore)}
+                  </Badge>
+                )}
+              </div>
+              <div className="flex gap-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
+                <p className="text-neutral-800">{dataset.usageExplanation}</p>
+              </div>
+              <p className="text-sm text-neutral-700">{compatibilityTooltip}</p>
+              {dataset.compatibilityEvidence?.missing_concepts?.length ? (
+                <div className="flex flex-wrap gap-2 text-sm">
+                  <span className="text-neutral-500">Missing concepts:</span>
+                  {dataset.compatibilityEvidence.missing_concepts.map((concept) => (
+                    <Badge key={concept} variant="outline">
+                      {concept}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <DatasetMetadataGrid dataset={dataset} preferredThemeIds={preferredThemeIds} />
+
           <div>
             <h3 className="font-semibold mb-2">Description</h3>
-            <p className="text-neutral-700 leading-6">{visibleDescription}</p>
+            <div className="prose prose-sm max-w-none text-neutral-700 leading-6">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                skipHtml
+                components={{
+                  a: ({ href, children }) => (
+                    <a href={href} target="_blank" rel="noreferrer" className="text-blue-700 underline">
+                      {children}
+                    </a>
+                  ),
+                }}
+              >
+                {visibleDescription}
+              </ReactMarkdown>
+            </div>
             {hasLongDescription && (
               <Button
                 type="button"
@@ -124,7 +181,6 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
             )}
           </div>
 
-          {/* Source */}
           <div>
             <h3 className="font-semibold mb-2">Source</h3>
             <div className="bg-neutral-50 rounded-lg border border-neutral-200 p-4 space-y-3">
@@ -137,14 +193,23 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
                   <p className="text-neutral-500">Source catalog</p>
                   <p className="font-medium text-neutral-900">{sourceLabel}</p>
                 </div>
+                <div>
+                  <p className="text-neutral-500">Published</p>
+                  <p className="font-medium text-neutral-900">{dataset.publicationDate || "Not listed"}</p>
+                </div>
+                <div>
+                  <p className="text-neutral-500">Access type</p>
+                  <p className="font-medium text-neutral-900">{formatAccessLabel(dataset.accessType)}</p>
+                </div>
                 <div className="md:col-span-2">
                   <p className="text-neutral-500">Dataset ID</p>
                   <p className="font-mono text-xs text-neutral-800 break-all">{dataset.id}</p>
                 </div>
-                <div className="md:col-span-2">
-                  <p className="text-neutral-500">Publication Date</p>
-                  <p className="font-medium text-neutral-900">{dataset.publicationDate}</p>
-                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {displayFormats.map((format) => (
+                  <Badge key={format} variant="outline">{format}</Badge>
+                ))}
               </div>
               {dataset.apiUrl ? (
                 <Button
@@ -164,71 +229,42 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
             </div>
           </div>
 
-          {dataset.categories && dataset.categories.length > 0 && (
-            <div>
-              <h3 className="font-semibold mb-2">Categories</h3>
-              <div className="flex flex-wrap gap-2">
-                {dataset.categories.map((category, idx) => {
-                  const [label, score] = Object.entries(category)[0] ?? ["Uncategorized", 0];
-                  return (
-                    <Badge key={`${label}-${idx}`} variant={idx === 0 ? "default" : "outline"}>
-                      {label} {score ? `${Math.round(score * 100)}%` : ""}
-                    </Badge>
-                  );
-                })}
+          {resources.length > 0 && (
+            <details className="rounded-lg border border-neutral-200 bg-white">
+              <summary className="cursor-pointer select-none px-4 py-3 font-semibold text-neutral-900">
+                Source files ({resources.length})
+              </summary>
+              <div className="border-t border-neutral-200 px-4 py-3 flex flex-wrap gap-2">
+                {resources.map((resource, index) => (
+                  <Button key={`${resource.url}-${index}`} asChild variant="outline" size="sm" className="gap-2">
+                    <a href={resource.url} target="_blank" rel="noreferrer" title={resource.description || resource.name}>
+                      <FileText className="w-4 h-4" />
+                      {resource.name}
+                      {resource.format ? <Badge variant="secondary">{formatFileTypeLabel(resource.format)}</Badge> : null}
+                    </a>
+                  </Button>
+                ))}
               </div>
-            </div>
+            </details>
           )}
 
-          {/* Quality Summary */}
           <div>
-            <h3 className="font-semibold mb-2">Quality Summary</h3>
-            <div className="flex flex-wrap gap-2">
-              {getQualityTags().map((tag, idx) => (
-                <Badge key={idx} variant="secondary">
-                  {tag}
-                </Badge>
-              ))}
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="font-semibold">Data Preview</h3>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <HelpCircle className="w-4 h-4 text-neutral-500" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  The preview is a small source sample. It may not represent the full dataset.
+                </TooltipContent>
+              </Tooltip>
             </div>
-          </div>
-
-          {/* Detailed Quality Metrics */}
-          <div>
-            <h3 className="font-semibold mb-2">Quality Screening Details</h3>
-            <div className="bg-neutral-50 rounded-lg border border-neutral-200 p-4 space-y-3">
-              <div className="flex justify-between items-center">
-                <span className="text-neutral-600">Completeness</span>
-                <div className="flex items-center gap-2">
-                  <div className="w-32 bg-neutral-200 rounded-full h-2">
-                    <div
-                      className="bg-blue-600 h-2 rounded-full"
-                      style={{ width: `${dataset.quality.completeness}%` }}
-                    />
-                  </div>
-                  <span className="font-medium w-12 text-right">
-                    {dataset.quality.completeness}%
-                  </span>
-                </div>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Consistency</span>
-                <span className="font-medium capitalize">{dataset.quality.consistency}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Documentation</span>
-                <span className="font-medium capitalize">{dataset.quality.documentation}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Preview */}
-          <div>
-            <h3 className="font-semibold mb-2">Data Preview</h3>
             <div className="bg-neutral-50 rounded-lg border border-neutral-200 p-4 space-y-4">
               {previewLoading && (
                 <div className="flex items-center gap-2 text-sm text-neutral-600">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Loading preview…
+                  Loading preview...
                 </div>
               )}
 
@@ -245,10 +281,18 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
                     <div className="flex items-center justify-between gap-3 mb-2">
                       <div className="flex items-center gap-2 text-neutral-700">
                         <TableProperties className="w-4 h-4" />
-                        <span className="text-sm font-medium">Schema</span>
+                        <span className="text-sm font-medium">Preview columns</span>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="w-4 h-4 text-neutral-500" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Fields listed in source metadata or detected in the preview rows.
+                          </TooltipContent>
+                        </Tooltip>
                       </div>
                       {preview?.resource_format && (
-                        <Badge variant="outline">{preview.resource_format}</Badge>
+                        <Badge variant="outline">{formatFileTypeLabel(preview.resource_format)}</Badge>
                       )}
                     </div>
                     {schemaColumns.length > 0 ? (
@@ -264,7 +308,7 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
                         )}
                       </div>
                     ) : (
-                      <p className="text-sm text-neutral-500">No schema metadata is available for this record.</p>
+                      <p className="text-sm text-neutral-500">No preview-column metadata is available for this record.</p>
                     )}
                   </div>
 
@@ -322,21 +366,91 @@ export function DatasetDetailPanel({ dataset, onClose }: DatasetDetailPanelProps
             </div>
           </div>
 
-          {/* Usage Explanation */}
-          <div>
-            <h3 className="font-semibold mb-2">How This Dataset Will Be Used</h3>
-            <div className="bg-blue-50 rounded-lg border border-blue-200 p-4 flex gap-3">
-              <CheckCircle2 className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-              <p className="text-blue-900">{dataset.usageExplanation}</p>
-            </div>
-          </div>
-
-          {/* Close button */}
           <div className="pt-2">
             <Button onClick={onClose} className="w-full">
               Close
             </Button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoBadge({
+  label,
+  description,
+}: {
+  label: string;
+  description: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="outline" className="bg-white">
+          {label}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>{description}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function DatasetMetadataGrid({
+  dataset,
+  preferredThemeIds,
+}: {
+  dataset: Dataset;
+  preferredThemeIds: string[];
+}) {
+  const dataTypes = (dataset.dataTypes || []).filter(Boolean);
+  const provenanceLabel = dataset.provenance || "";
+  const categoryDisplay = getDatasetCategoryDisplay(dataset, preferredThemeIds);
+
+  return (
+    <div className="grid grid-cols-1 gap-3 rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-sm md:grid-cols-3">
+      <div>
+        <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Category</p>
+        <div className="mt-1 space-y-2">
+          <div className="space-y-1">
+            <p className="font-medium text-neutral-900">{categoryDisplay.primary.label}</p>
+            {categoryDisplay.secondaryThemeIds.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {categoryDisplay.secondaryThemeIds.map((themeId) => (
+                  <Badge key={themeId} variant="outline" className="bg-white">
+                    {formatThemeName(themeId)}
+                  </Badge>
+                ))}
+                {categoryDisplay.overflowCount > 0 && (
+                  <Badge variant="outline" className="bg-white">
+                    +{categoryDisplay.overflowCount} secondary
+                  </Badge>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      <div>
+        <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Type</p>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {dataTypes.length > 0 ? (
+            dataTypes.map((tag) => (
+              <InfoBadge key={tag} label={tag} description={getDataTypeDescription(tag)} />
+            ))
+          ) : (
+            <span className="text-neutral-600">Not inferred</span>
+          )}
+        </div>
+      </div>
+      <div>
+        <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Labels</p>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {provenanceLabel ? (
+            <InfoBadge label={provenanceLabel} description={getProvenanceDescription(provenanceLabel)} />
+          ) : (
+            <span className="text-neutral-600">No provenance label</span>
+          )}
         </div>
       </div>
     </div>
@@ -350,6 +464,12 @@ function formatSourceLabel(source: string): string {
     unknown: "Unknown source",
   };
   return labels[source] || source;
+}
+
+function formatAccessLabel(accessType: Dataset["accessType"]): string {
+  if (accessType === "open") return "Open access";
+  if (accessType === "restricted") return "Restricted access";
+  return "Access type: request needed";
 }
 
 function truncateDescription(description: string, maxLength: number): string {
@@ -382,9 +502,47 @@ function getPreviewColumnNames(schemaNames: string[], rows: Array<Record<string,
   return names;
 }
 
+function isMissingPreviewValue(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "" || ["na", "n/a", "null", "none"].includes(normalized);
+}
+
 function formatPreviewValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "n/a";
+  if (isMissingPreviewValue(value)) return "n/a";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return JSON.stringify(value);
+}
+
+function getDisplayFormats(dataset: Dataset): string[] {
+  return formatFileTypeLabels([
+    ...(dataset.formats || []),
+    ...(dataset.resources || []).map((resource) => resource.format || ""),
+  ]);
+}
+
+function getProvenanceDescription(label: string): string {
+  const descriptions: Record<string, string> = {
+    "Official Government": "Published by a government or public-sector catalog.",
+    "Community-Generated": "Produced or maintained by community contributors.",
+    "Research Organization": "Published by a research, university, or observatory source.",
+    "Participatory Data": "Collected through participatory or stakeholder input.",
+    "Non-Profit / NGO": "Published by a non-profit or civil-society organization.",
+    "Catalog Metadata": "Provenance is inferred from the available catalog metadata.",
+  };
+  return descriptions[label] || "Provenance inferred from catalog metadata.";
+}
+
+function getDataTypeDescription(label: string): string {
+  const descriptions: Record<string, string> = {
+    Quantitative: "Structured values, counts, measurements, or coded fields.",
+    Qualitative: "Textual, narrative, or perception-based information.",
+    "Mixed Methods": "Combines structured measurements with qualitative context.",
+    "Survey Data": "Likely collected through questionnaires or survey instruments.",
+    Crowdsourced: "Collected or maintained by public contributors.",
+    "Participatory Data": "Collected with direct participant or stakeholder input.",
+  };
+  return descriptions[label] || "Data type inferred from metadata and file formats.";
 }

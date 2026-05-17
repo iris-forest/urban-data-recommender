@@ -25,6 +25,9 @@ class Config:
     
     # Caching
     CACHE_API_RESULTS: bool = os.getenv("CACHE_API_RESULTS", "true").lower() == "true"
+
+    # Fit analysis may fetch preview rows from source URLs when catalog sample is empty
+    FIT_ANALYSIS_ALLOW_FETCH: bool = os.getenv("FIT_ANALYSIS_ALLOW_FETCH", "true").lower() == "true"
     
     # Theme extraction — keyword-only simplified configuration
     THEME_EXTRACTION_METHOD: Literal["keywords"] = os.getenv("THEME_EXTRACTION_METHOD", "keywords")  # type: ignore
@@ -56,6 +59,7 @@ class Config:
         "CORS_ORIGIN_REGEX",
         r"^http://(localhost|127\.0\.0\.1):[0-9]+$",
     )
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
     
     @classmethod
     def is_api_enabled(cls) -> bool:

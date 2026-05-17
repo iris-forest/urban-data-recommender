@@ -9,7 +9,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, Optional
 from datetime import datetime
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
+from starlette.concurrency import run_in_threadpool
 import logging
 
 from .api_mappers import (
@@ -20,6 +21,7 @@ from .api_mappers import (
 from .api_schemas import (
     AnalyzeRequest,
     AnalyzeResponse,
+    CancelBackgroundJobsResponse,
     ClearImportSourceResponse,
     DatasetCatalogResponse,
     DatasetFitAnalysisRequest,
@@ -105,6 +107,12 @@ app.add_middleware(
 )
 
 
+@app.get("/", include_in_schema=False)
+async def frontend_redirect() -> RedirectResponse:
+    """Send accidental backend-root visits to the local frontend app."""
+    return RedirectResponse(Config.FRONTEND_URL)
+
+
 # =============================================================================
 # Indicator Analysis And Dataset Recommendations
 # =============================================================================
@@ -128,7 +136,8 @@ async def analyze_indicator(request: AnalyzeRequest) -> AnalyzeResponse:
     ```
     """
     try:
-        state = analyze_indicator_state(request.indicator_text)
+        await run_in_threadpool(FULL_IMPORT_MANAGER.cancel_all_active)
+        state = await run_in_threadpool(analyze_indicator_state, request.indicator_text)
         if state.get("errors"):
             raise HTTPException(status_code=400, detail=state["errors"][0])
 
@@ -148,7 +157,7 @@ async def analyze_indicator(request: AnalyzeRequest) -> AnalyzeResponse:
 async def suggest_topics(request: TopicSuggestRequest) -> TopicSuggestResponse:
     """Suggest topics and parsed indicator context for confirmation in the UI."""
     try:
-        state = analyze_indicator_state(request.indicator_text)
+        state = await run_in_threadpool(analyze_indicator_state, request.indicator_text)
         if state.get("errors"):
             raise HTTPException(status_code=400, detail=state["errors"][0])
 
@@ -185,7 +194,8 @@ async def get_recommendations(request: RecommendRequest) -> RecommendResponse:
     ```
     """
     try:
-        state = recommend_datasets_state(
+        state = await run_in_threadpool(
+            recommend_datasets_state,
             indicator_text=request.indicator_text,
             extracted_themes=request.extracted_themes,
         )
@@ -400,6 +410,41 @@ async def rebuild_full_catalog_cache(source: str, background_tasks: BackgroundTa
         raise HTTPException(status_code=500, detail=f"Full catalog cache rebuild failed to start: {e}")
 
 
+@app.post("/import/full/cancel-active", response_model=CancelBackgroundJobsResponse)
+async def cancel_active_full_catalog_imports() -> CancelBackgroundJobsResponse:
+    """Stop queued or running full-catalog import jobs so interactive analysis can run alone."""
+    cancelled = await run_in_threadpool(FULL_IMPORT_MANAGER.cancel_all_active)
+    return CancelBackgroundJobsResponse(cancelled_sources=cancelled)
+
+
+@app.post("/import/{source}/full/cancel", response_model=FullCatalogImportProgressResponse)
+async def cancel_full_catalog_import(source: str) -> FullCatalogImportProgressResponse:
+    """Request cancellation for one source full-catalog import job."""
+    try:
+        canonical_source = normalize_import_source(source)
+        if not canonical_source:
+            valid = ", ".join(s.value for s in ImportSource)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown import source '{source}'. Valid values: {valid}",
+            )
+
+        mapped = IMPORT_SOURCE_TO_BACKEND[canonical_source]
+        if mapped not in FULL_IMPORT_SOURCES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Full catalog import is not supported for '{canonical_source}'",
+            )
+
+        progress = await run_in_threadpool(FULL_IMPORT_MANAGER.request_cancel, mapped)
+        return full_import_progress_response(canonical_source, progress.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Full catalog import cancel failed for source %s", source)
+        raise HTTPException(status_code=500, detail=f"Full catalog import cancel failed: {e}")
+
+
 @app.get("/import/{source}/full/progress", response_model=FullCatalogImportProgressResponse)
 async def get_full_catalog_import_progress(source: str) -> FullCatalogImportProgressResponse:
     """Return progress for a source full-catalog import job or its cached manifest."""
@@ -512,6 +557,7 @@ async def create_package(request: PackageCreateRequest):
             dataset_ids=request.dataset_ids,
             query=request.query or "",
             limit=request.limit,
+            dataset_notes=request.dataset_notes,
         )
 
         filename = "urban-planner-dataset-package.zip"
@@ -539,7 +585,7 @@ async def create_package_manifest(request: PackageCreateRequest):
             matches = semantic_search_summaries(request.query, summaries, limit=request.limit)
             dataset_ids = [match.summary.id for match in matches]
 
-        return build_package_manifest(dataset_ids)
+        return build_package_manifest(dataset_ids, dataset_notes=request.dataset_notes)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Package manifest creation failed: {str(e)}")
 

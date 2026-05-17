@@ -13,6 +13,24 @@ export interface DataTheme {
   recommended?: boolean;
 }
 
+export interface DatasetResource {
+  id?: string;
+  name: string;
+  description?: string;
+  format?: string;
+  url: string;
+}
+
+export type CompatibilityBand = "strong" | "partial" | "weak";
+
+export interface CompatibilityEvidence {
+  matched_concepts: string[];
+  missing_concepts: string[];
+  geography: string;
+  time: string;
+  summary: string;
+}
+
 export interface Dataset {
   id: string;
   name: string;
@@ -22,6 +40,9 @@ export interface Dataset {
   source?: string;
   apiUrl?: string;
   formats?: string[];
+  resources?: DatasetResource[];
+  provenance?: string;
+  dataTypes?: string[];
   spatialCoverage: string;
   spatialResolution: string;
   updateFrequency: string;
@@ -31,6 +52,7 @@ export interface Dataset {
   theme: string;
   themes?: string[];
   matchingThemes?: string[];
+  focusedMatchingThemes?: string[];
   category: string;
   categories?: Array<Record<string, number>>;
   categoryConfidence?: number;
@@ -39,6 +61,11 @@ export interface Dataset {
   previewAvailable?: boolean;
   essential: boolean;
   relevanceScore?: number;
+  compatibilityScore?: number;
+  compatibilityReason?: string;
+  semanticScore?: number;
+  compatibilityBand?: CompatibilityBand;
+  compatibilityEvidence?: CompatibilityEvidence;
   quality: {
     completeness: number;
     timeliness: "recent" | "moderate" | "outdated";
@@ -60,6 +87,55 @@ export interface DatasetFitColumnInsight {
   notes: string;
 }
 
+export interface EdaCheckItem {
+  id: string;
+  status: "good" | "check" | "caution" | "unknown" | string;
+  message: string;
+}
+
+export interface EdaColumnProfile {
+  name: string;
+  inferred_type: string;
+  missing_count: number;
+  missing_pct: number;
+  placeholder_count: number;
+  distinct_count: number;
+  sample_values: string[];
+  flags: string[];
+}
+
+export interface PreviewSample {
+  columns: Array<Record<string, unknown>>;
+  rows: Array<Record<string, unknown>>;
+  source_url: string;
+  preview_source: string;
+}
+
+export interface EdaProfile {
+  rows_analyzed: number;
+  columns_analyzed: number;
+  preview_rows_requested: number;
+  metadata_only: boolean;
+  preview_source?: string;
+  preview_stats: Record<string, unknown>;
+  column_profiles?: EdaColumnProfile[];
+  profile_notes: string[];
+}
+
+export interface EdaFit {
+  roles_found: string[];
+  roles_missing: string[];
+  join_keys: string[];
+  time_fields: string[];
+  geo_fields: string[];
+}
+
+export interface EdaInterpretation {
+  readiness_band: string;
+  quality_checks: EdaCheckItem[];
+  synthesis: string;
+}
+
 export interface DatasetFitInsight {
   dataset_id: string;
   title: string;
@@ -67,6 +143,8 @@ export interface DatasetFitInsight {
   formats?: string[];
   source_url?: string;
   fit_score: number;
+  quality_score: number;
+  quality_band: string;
   recommended_role: string;
   fit_summary: string;
   useful_columns: DatasetFitColumnInsight[];
@@ -77,6 +155,10 @@ export interface DatasetFitInsight {
   geo_fields: string[];
   quality_risks: string[];
   recommended_next_action: string;
+  eda_profile?: EdaProfile;
+  eda_fit?: EdaFit;
+  eda_interpretation?: EdaInterpretation;
+  preview_sample?: PreviewSample | null;
 }
 
 export interface CrossDatasetFitSummary {
@@ -102,3 +184,5 @@ export interface DatasetFitAnalysisRequest {
   parsed_indicator: Record<string, unknown>;
   preview_rows?: number;
 }
+
+export type DatasetNotes = Record<string, string>;

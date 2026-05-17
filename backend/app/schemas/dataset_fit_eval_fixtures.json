@@ -1,0 +1,68 @@
+[
+  {
+    "name": "preview_missingness_flags_caution",
+    "template": "green_space_with_gaps",
+    "indicator_text": "Green space area per resident by district for the last 12 months.",
+    "selected_themes": ["green_space", "population"],
+    "parsed_indicator": {
+      "geographic_level": "Madrid district",
+      "time_frame": "Last 12 months",
+      "population": "Residents"
+    },
+    "preview_rows": 2,
+    "expect": {
+      "rows_analyzed_min": 1,
+      "column_profiles_min": 2,
+      "quality_check_id": "preview_missingness",
+      "quality_check_status": "caution"
+    }
+  },
+  {
+    "name": "uniform_column_detected",
+    "template": "uniform_status_column",
+    "indicator_text": "Bus stop accessibility by district.",
+    "selected_themes": ["transport_networks", "accessibility_proximity"],
+    "parsed_indicator": {
+      "geographic_level": "Madrid district",
+      "time_frame": "Last 12 months"
+    },
+    "preview_rows": 3,
+    "expect": {
+      "uniform_columns_min": 1,
+      "profile_notes_contain": "Uniform"
+    }
+  },
+  {
+    "name": "metadata_only_no_rows",
+    "template": "no_preview_rows",
+    "indicator_text": "Population per district.",
+    "selected_themes": ["population"],
+    "parsed_indicator": {
+      "geographic_level": "Madrid district",
+      "population": "Residents"
+    },
+    "preview_rows": 5,
+    "expect": {
+      "metadata_only": true,
+      "preview_source": "none",
+      "readiness_band": "metadata_only_review"
+    }
+  },
+  {
+    "name": "good_preview_profiles_columns",
+    "template": "green_space_complete",
+    "indicator_text": "Green space area per resident by district.",
+    "selected_themes": ["green_space", "population"],
+    "parsed_indicator": {
+      "geographic_level": "Madrid district",
+      "population": "Residents"
+    },
+    "preview_rows": 2,
+    "expect": {
+      "preview_source": "catalog_sample",
+      "column_profiles_min": 3,
+      "preview_sample_rows_min": 1,
+      "roles_found_contains": "green_space"
+    }
+  }
+]

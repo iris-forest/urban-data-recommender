@@ -7,18 +7,26 @@ from typing import Any, Dict
 from .models import Dataset
 
 
-CATALOG_TRANSLATION_VERSION = "rules-v2"
+CATALOG_TRANSLATION_VERSION = "rules-v3"
 
 PHRASE_TRANSLATIONS = (
     (r"\bAyuntamiento de Madrid\b", "Madrid City Council"),
     (r"\bPortal de datos abiertos\b", "Open Data Portal"),
     (r"\bDatos abiertos\b", "Open Data"),
     (r"\bComunidad de Madrid\b", "Community of Madrid"),
+    (
+        r"\bEstudio de consecuencias de la pandemia por COVID-19 en la poblaci[oó]n de la ciudad de Madrid\b",
+        "Study of the consequences of the COVID-19 pandemic for Madrid residents",
+    ),
+    (r"\bCalidad del aire\.?\s+Estaciones de control\b", "Air quality monitoring stations"),
     (r"\bCalidad del aire\b", "Air quality"),
+    (r"\bCalidad del agua regenerada\b", "Reclaimed water quality"),
     (r"\bcontaminaci[oó]n atmosf[eé]rica\b", "air pollution"),
+    (r"\bZona de Bajas Emisiones de Especial Protección\b", "Special Protection Low-Emission Zone"),
     (r"\bZonas de bajas emisiones\b", "Low-emission zones"),
     (r"\bZona de bajas emisiones\b", "Low-emission zone"),
     (r"\bZBE\b", "LEZ"),
+    (r"\bSuperficie de parques y zonas verdes\b", "Park and green area surface"),
     (r"\bParques y jardines\b", "Parks and gardens"),
     (r"\bParques y zonas verdes\b", "Parks and green areas"),
     (r"\bZonas verdes urbanas\b", "Urban green areas"),
@@ -26,6 +34,7 @@ PHRASE_TRANSLATIONS = (
     (r"\bZona verde\b", "Green area"),
     (r"\bSuperficie de parques\b", "Park area"),
     (r"\bSuperficie ocupada por parques\b", "Area occupied by parks"),
+    (r"\bSuperficie de\b", "Area of"),
     (r"\bArbolado\b", "Trees"),
     (r"\bPoblaci[oó]n\b", "Population"),
     (r"\bPadr[oó]n municipal\b", "Municipal register"),
@@ -86,11 +95,29 @@ PHRASE_TRANSLATIONS = (
     (r"\bMensual\b", "Monthly"),
     (r"\bSemanal\b", "Weekly"),
     (r"\bDiario\b", "Daily"),
+    (r"\benero\b", "January"),
+    (r"\bfebrero\b", "February"),
+    (r"\bmarzo\b", "March"),
+    (r"\babril\b", "April"),
+    (r"\bmayo\b", "May"),
+    (r"\bjunio\b", "June"),
+    (r"\bjulio\b", "July"),
+    (r"\bagosto\b", "August"),
+    (r"\bseptiembre\b", "September"),
+    (r"\boctubre\b", "October"),
+    (r"\bnoviembre\b", "November"),
+    (r"\bdiciembre\b", "December"),
     (r"\bDesconocido\b", "Unknown"),
     (r"\bsin periodicidad\b", "no fixed frequency"),
     (r"\bactualizaci[oó]n\b", "update"),
     (r"\bfecha\b", "date"),
+    (r"\bdetalle\b", "detail"),
+    (r"\bdetalles\b", "details"),
     (r"\bAño\b", "Year"),
+    (r"\bServicio de Estacionamiento Regulado\b", "Regulated Parking Service"),
+    (r"\bTiques de aparcamiento\b", "Parking tickets"),
+    (r"\bAutorizaciones\b", "Authorizations"),
+    (r"\bPlaza El[ií]ptica\b", "Eliptica square"),
     (r"\bActuaciones de mejora\b", "Improvement works"),
 )
 
@@ -227,7 +254,7 @@ def ensure_record_translations(data: Dict[str, Any]) -> Dict[str, Any]:
         else data.get("description_en") or translate_catalog_text(description_original)
     )
     data["translation_method"] = str(data.get("translation_method") or "rule")
-    data["translation_version"] = str(data.get("translation_version") or CATALOG_TRANSLATION_VERSION)
+    data["translation_version"] = CATALOG_TRANSLATION_VERSION
     return data
 
 
@@ -235,16 +262,12 @@ def ensure_dataset_translations(dataset: Dataset) -> Dataset:
     dataset.title_original = dataset.title_original or dataset.title
     dataset.description_original = dataset.description_original or dataset.description
     should_regenerate = dataset.translation_version != CATALOG_TRANSLATION_VERSION
-    dataset.title_en = (
-        translate_catalog_text(dataset.title_original)
-        if should_regenerate
-        else dataset.title_en or translate_catalog_text(dataset.title_original)
-    )
-    dataset.description_en = (
-        translate_catalog_text(dataset.description_original)
-        if should_regenerate
-        else dataset.description_en or translate_catalog_text(dataset.description_original)
-    )
+    if should_regenerate:
+        dataset.title_en = translate_catalog_text(dataset.title_original)
+        dataset.description_en = translate_catalog_text(dataset.description_original)
+    else:
+        dataset.title_en = dataset.title_en or translate_catalog_text(dataset.title_original)
+        dataset.description_en = dataset.description_en or translate_catalog_text(dataset.description_original)
     dataset.translation_method = dataset.translation_method or "rule"
-    dataset.translation_version = dataset.translation_version or CATALOG_TRANSLATION_VERSION
+    dataset.translation_version = CATALOG_TRANSLATION_VERSION
     return dataset

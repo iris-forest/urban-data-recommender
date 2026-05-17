@@ -106,7 +106,7 @@ def infer_primary_category_from_themes(themes: List[str]) -> str:
         "air_quality": "Environment",
         "heat_exposure": "Environment",
         "water_management": "Water",
-        "land_use": "Urban Form",
+        "land_use": "Land Use, Buildings, and Boundaries",
         "socioeconomic_context": "Socioeconomic",
         "employment": "Economy",
         "health": "Health",

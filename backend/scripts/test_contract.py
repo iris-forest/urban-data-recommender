@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 import sys
@@ -20,13 +21,17 @@ from fastapi.testclient import TestClient
 import app.catalog as catalog_module
 import app.storage as storage
 from app.agent import extract_themes_with_confidence, identify_risks_node, score_recommendations_node
-from app.api_mappers import dataset_to_item
+from app.api_mappers import dataset_to_item, recommendation_to_item
 from app.api_adapters import CatalogPage, MadridCKANAdapter
 from app.catalog_translation import ensure_record_translations
 from app.api import app
 from app.catalog import IMPORTED_API_DATASETS
 from app.config import Config
-from app.domain.recommendations import candidate_from_dataset, score_candidate_recommendations
+from app.domain.recommendations import (
+    COMPATIBILITY_STRONG_MIN,
+    candidate_from_dataset,
+    score_candidate_recommendations,
+)
 from app.full_catalog_import import FULL_IMPORT_MANAGER, FullCatalogImportManager
 from app.models import Dataset, DatasetQuality
 from app.storage import read_mapping, write_mapping
@@ -190,6 +195,10 @@ def test_datasets_contract() -> None:
     assert isinstance(item["quality"]["completeness"], float)
     assert item["preview_available"] is True
     assert item["schema_fields"][0]["name"] == "stop_id"
+    assert item["resources"][0]["name"] == "Stops CSV"
+    assert item["resources"][0]["url"] == "https://example.test/stops.csv"
+    assert item["provenance"] == "Official Government"
+    assert "Quantitative" in item["data_types"]
 
 
 def test_catalog_translation_fields_keep_both_languages() -> None:
@@ -200,10 +209,17 @@ def test_catalog_translation_fields_keep_both_languages() -> None:
         }
     )
     assert record["title_original"] == "Calidad del aire. Estaciones de control"
-    assert "Air quality" in record["title_en"]
-    assert "Stations" in record["title_en"]
+    assert record["title_en"] == "Air quality monitoring stations"
     assert record["description_original"] == "Información sobre calidad del aire por distrito."
     assert "Air quality" in record["description_en"]
+
+    parks_record = ensure_record_translations(
+        {
+            "title": "Superficie de parques y zonas verdes de Madrid",
+            "description": "Datos sobre zonas verdes urbanas por distrito.",
+        }
+    )
+    assert parks_record["title_en"] == "Park and green area surface of Madrid"
 
 
 def test_analyze_contract() -> None:
@@ -292,6 +308,8 @@ def test_recommend_contract_and_imported_dataset_participation() -> None:
     assert "recommendations" in payload
     assert "data_gaps" in payload
     assert "quality_risks" in payload
+    assert any("stage1_broad_retrieval" in entry for entry in payload["debug_trace"])
+    assert any("stage2_semantic_rerank" in entry for entry in payload["debug_trace"])
 
     imported = [
         item
@@ -301,6 +319,11 @@ def test_recommend_contract_and_imported_dataset_participation() -> None:
     assert imported, json.dumps(payload["recommendations"], indent=2)
     assert imported[0]["primary_category"] == "Transport"
     assert imported[0]["is_essential"] in {True, False}
+    assert imported[0]["compatibility_score"] >= 0.4
+    assert imported[0]["semantic_score"] is not None
+    assert imported[0]["compatibility_band"] in {"strong", "partial", "weak"}
+    assert imported[0]["compatibility_evidence"]["summary"]
+    assert "semantic/title/description match" in imported[0]["compatibility_reason"]
 
 
 def test_package_contract_for_imported_ids() -> None:
@@ -309,7 +332,12 @@ def test_package_contract_for_imported_ids() -> None:
 
     response = client.post(
         "/package/create",
-        json={"dataset_ids": ["test_imported_bus_access"]},
+        json={
+            "dataset_ids": ["test_imported_bus_access"],
+            "dataset_notes": {
+                "test_imported_bus_access": "Local staff use this stop list for accessibility checks."
+            },
+        },
     )
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "application/zip"
@@ -319,11 +347,21 @@ def test_package_contract_for_imported_ids() -> None:
         assert manifest["dataset_count"] == 1
         categories = {item["dataset_id"]: item["category"] for item in manifest["datasets"]}
         assert categories["test_imported_bus_access"] == "Transport"
-        assert manifest["datasets"][0]["columns"][0]["name"] == "stop_id"
+        dataset_entry = manifest["datasets"][0]
+        assert dataset_entry["columns"][0]["name"] == "stop_id"
+        assert dataset_entry["resources"][0]["name"] == "Stops CSV"
+        assert dataset_entry["provenance"] == "Official Government"
+        assert "Quantitative" in dataset_entry["data_types"]
+        assert dataset_entry["domain_knowledge_note"] == "Local staff use this stop list for accessibility checks."
 
     manifest_response = client.post(
         "/package/manifest",
-        json={"dataset_ids": ["test_imported_bus_access"]},
+        json={
+            "dataset_ids": ["test_imported_bus_access"],
+            "dataset_notes": {
+                "test_imported_bus_access": "Local staff use this stop list for accessibility checks."
+            },
+        },
     )
     assert manifest_response.status_code == 200, manifest_response.text
     assert manifest_response.json() == manifest
@@ -343,6 +381,9 @@ def test_dataset_preview_contract() -> None:
 
 
 def test_dataset_fit_analysis_contract_heuristic() -> None:
+    from app.preview_cache import clear_preview_cache
+
+    clear_preview_cache()
     IMPORTED_API_DATASETS.clear()
     IMPORTED_API_DATASETS.append(_fake_fit_analysis_dataset())
 
@@ -405,6 +446,270 @@ def test_dataset_fit_analysis_contract_heuristic() -> None:
     join_strategy = payload["cross_dataset_summary"]["join_strategy"]
     assert not any("(" in item and ":" in item for item in join_strategy)
     assert not any(item.lower().startswith("align records") for item in join_strategy)
+
+    insight = payload["datasets"][0]
+    assert "eda_profile" in insight
+    assert insight["eda_profile"]["rows_analyzed"] >= 1
+    assert "eda_fit" in insight
+    assert "green_space" in insight["eda_fit"]["roles_found"] or "population" in insight["eda_fit"]["roles_found"]
+    assert "eda_interpretation" in insight
+    assert insight["eda_interpretation"]["readiness_band"]
+    assert insight["eda_interpretation"]["quality_checks"]
+    assert "ethical_checks" not in insight["eda_interpretation"]
+    assert 0 <= insight["quality_score"] <= 100
+    assert insight["quality_band"] in {"strong", "usable", "limited"}
+
+
+def test_preview_missingness_helper() -> None:
+    from app.preview_quality import analyze_preview_missingness, build_column_profiles, is_missing_value
+
+    assert is_missing_value(None)
+    assert is_missing_value("NA")
+    assert is_missing_value("  ")
+
+    stats = analyze_preview_missingness(
+        [
+            {"district": "Centro", "residents": None},
+            {"district": "", "residents": 100},
+        ]
+    )
+    assert stats["rows_with_missing"] == 2
+    assert "district" in stats["columns_affected"]
+    assert "residents" in stats["columns_affected"]
+    assert stats["column_missingness"]["district"]["missing_count"] == 1
+    assert stats["column_missingness"]["residents"]["missing_count"] == 1
+
+    profiles = build_column_profiles(
+        [
+            {"status": "active", "value": 1},
+            {"status": "active", "value": 2},
+        ]
+    )
+    status_profile = next(profile for profile in profiles if profile["name"] == "status")
+    assert "uniform" in status_profile["flags"]
+    assert status_profile["inferred_type"] == "text"
+
+
+def test_dataset_fit_eda_flags_preview_missingness() -> None:
+    from app.preview_cache import clear_preview_cache
+
+    clear_preview_cache()
+    IMPORTED_API_DATASETS.clear()
+    dataset = _fake_fit_analysis_dataset()
+    dataset.sample_preview = [
+        {"district": "Centro", "green_area_m2": None, "residents": 140000, "date": "2026-04-01"},
+        {"district": "Retiro", "green_area_m2": 89000, "residents": None, "date": "2026-04-01"},
+    ]
+    IMPORTED_API_DATASETS.append(dataset)
+
+    original_llm_config = (
+        Config.ENABLE_LLM_INSIGHTS,
+        Config.LLM_PROVIDER,
+        Config.LLM_API_KEY,
+    )
+    Config.ENABLE_LLM_INSIGHTS = False
+    Config.LLM_PROVIDER = "none"
+    Config.LLM_API_KEY = ""
+
+    try:
+        response = client.post(
+            "/datasets/analyze-fit",
+            json={
+                "indicator_text": "Green space area per resident by district for the last 12 months.",
+                "selected_themes": ["green_space", "population"],
+                "dataset_ids": ["test_green_space_residents"],
+                "parsed_indicator": {
+                    "geographic_level": "Madrid district",
+                    "time_frame": "Last 12 months",
+                    "population": "Residents",
+                },
+                "preview_rows": 2,
+            },
+        )
+    finally:
+        (
+            Config.ENABLE_LLM_INSIGHTS,
+            Config.LLM_PROVIDER,
+            Config.LLM_API_KEY,
+        ) = original_llm_config
+
+    assert response.status_code == 200, response.text
+    insight = response.json()["datasets"][0]
+    missingness_checks = [
+        check
+        for check in insight["eda_interpretation"]["quality_checks"]
+        if check["id"] == "preview_missingness"
+    ]
+    assert missingness_checks
+    assert missingness_checks[0]["status"] == "caution"
+    assert insight["eda_profile"]["column_profiles"]
+    assert len(insight["eda_profile"]["column_profiles"]) >= 2
+    assert insight.get("preview_sample")
+    assert insight["preview_sample"]["rows"]
+
+
+def test_fit_analysis_fetches_when_no_sample() -> None:
+    from unittest.mock import patch
+
+    from app.preview_cache import clear_preview_cache
+
+    clear_preview_cache()
+    IMPORTED_API_DATASETS.clear()
+    dataset = _fake_imported_dataset()
+    dataset.sample_preview = []
+    IMPORTED_API_DATASETS.append(dataset)
+
+    fetched_rows = [
+        {"stop_id": "28079-001", "stop_name": "Goya", "district": "Salamanca"},
+    ]
+
+    def _mock_fetch(resource: dict, max_rows: int) -> list:
+        return fetched_rows[:max_rows]
+
+    original_llm_config = (
+        Config.ENABLE_LLM_INSIGHTS,
+        Config.LLM_PROVIDER,
+        Config.LLM_API_KEY,
+        Config.FIT_ANALYSIS_ALLOW_FETCH,
+    )
+    Config.ENABLE_LLM_INSIGHTS = False
+    Config.LLM_PROVIDER = "none"
+    Config.LLM_API_KEY = ""
+    Config.FIT_ANALYSIS_ALLOW_FETCH = True
+
+    try:
+        with patch("app.preview._fetch_resource_rows", _mock_fetch):
+            response = client.post(
+                "/datasets/analyze-fit",
+                json={
+                    "indicator_text": "Bus stop accessibility by district.",
+                    "selected_themes": ["transport_networks"],
+                    "dataset_ids": ["test_imported_bus_access"],
+                    "parsed_indicator": {"geographic_level": "Madrid district"},
+                    "preview_rows": 3,
+                },
+            )
+    finally:
+        (
+            Config.ENABLE_LLM_INSIGHTS,
+            Config.LLM_PROVIDER,
+            Config.LLM_API_KEY,
+            Config.FIT_ANALYSIS_ALLOW_FETCH,
+        ) = original_llm_config
+        clear_preview_cache()
+
+    assert response.status_code == 200, response.text
+    insight = response.json()["datasets"][0]
+    assert insight["eda_profile"]["preview_source"] == "fetched_resource"
+    assert insight["eda_profile"]["rows_analyzed"] >= 1
+    assert insight.get("preview_sample")
+    assert insight["preview_sample"]["rows"][0]["stop_name"] == "Goya"
+
+
+def _fit_eval_dataset_for_template(template: str) -> Dataset:
+    if template == "green_space_with_gaps":
+        dataset = _fake_fit_analysis_dataset()
+        dataset.sample_preview = [
+            {"district": "Centro", "green_area_m2": None, "residents": 140000, "date": "2026-04-01"},
+            {"district": "Retiro", "green_area_m2": 89000, "residents": None, "date": "2026-04-01"},
+        ]
+        return dataset
+    if template == "uniform_status_column":
+        dataset = _fake_imported_dataset()
+        dataset.sample_preview = [
+            {"stop_id": "1", "status": "active", "district": "Centro"},
+            {"stop_id": "2", "status": "active", "district": "Retiro"},
+            {"stop_id": "3", "status": "active", "district": "Salamanca"},
+        ]
+        return dataset
+    if template == "no_preview_rows":
+        dataset = _fake_fit_analysis_dataset()
+        dataset.dataset_id = "fit_eval_no_preview"
+        dataset.sample_preview = []
+        dataset.preview_resources = []
+        dataset.schema_fields = [
+            {"name": "district", "inferred_type": "text", "description": "District"},
+        ]
+        return dataset
+    if template == "green_space_complete":
+        return _fake_fit_analysis_dataset()
+    raise ValueError(f"Unknown fit eval template: {template}")
+
+
+def _load_dataset_fit_eval_fixtures() -> list[dict]:
+    fixture_path = Path(__file__).resolve().parents[1] / "app" / "schemas" / "dataset_fit_eval_fixtures.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def test_dataset_fit_eval_fixtures_from_json() -> None:
+    from app.preview_cache import clear_preview_cache
+
+    original_llm_config = (
+        Config.ENABLE_LLM_INSIGHTS,
+        Config.LLM_PROVIDER,
+        Config.LLM_API_KEY,
+    )
+    Config.ENABLE_LLM_INSIGHTS = False
+    Config.LLM_PROVIDER = "none"
+    Config.LLM_API_KEY = ""
+
+    try:
+        for case in _load_dataset_fit_eval_fixtures():
+            clear_preview_cache()
+            IMPORTED_API_DATASETS.clear()
+            dataset = _fit_eval_dataset_for_template(case["template"])
+            IMPORTED_API_DATASETS.append(dataset)
+
+            response = client.post(
+                "/datasets/analyze-fit",
+                json={
+                    "indicator_text": case["indicator_text"],
+                    "selected_themes": case.get("selected_themes", []),
+                    "dataset_ids": [dataset.dataset_id],
+                    "parsed_indicator": case.get("parsed_indicator", {}),
+                    "preview_rows": case.get("preview_rows", 5),
+                },
+            )
+            assert response.status_code == 200, f"{case['name']}: {response.text}"
+            insight = response.json()["datasets"][0]
+            expect = case.get("expect", {})
+            profile = insight["eda_profile"]
+
+            if "metadata_only" in expect:
+                assert profile["metadata_only"] is expect["metadata_only"], case["name"]
+            if "preview_source" in expect:
+                assert profile["preview_source"] == expect["preview_source"], case["name"]
+            if "rows_analyzed_min" in expect:
+                assert profile["rows_analyzed"] >= expect["rows_analyzed_min"], case["name"]
+            if "column_profiles_min" in expect:
+                assert len(profile.get("column_profiles", [])) >= expect["column_profiles_min"], case["name"]
+            if "uniform_columns_min" in expect:
+                uniform = (profile.get("preview_stats") or {}).get("uniform_columns", [])
+                assert len(uniform) >= expect["uniform_columns_min"], case["name"]
+            if "profile_notes_contain" in expect:
+                notes_text = " ".join(profile.get("profile_notes", []))
+                assert expect["profile_notes_contain"] in notes_text, case["name"]
+            if "readiness_band" in expect:
+                assert insight["eda_interpretation"]["readiness_band"] == expect["readiness_band"], case["name"]
+            if "preview_sample_rows_min" in expect:
+                sample = insight.get("preview_sample") or {}
+                assert len(sample.get("rows", [])) >= expect["preview_sample_rows_min"], case["name"]
+            if "roles_found_contains" in expect:
+                roles = insight.get("eda_fit", {}).get("roles_found", [])
+                assert expect["roles_found_contains"] in roles, case["name"]
+            if "quality_check_id" in expect:
+                checks = insight["eda_interpretation"]["quality_checks"]
+                matched = [check for check in checks if check["id"] == expect["quality_check_id"]]
+                assert matched, f"{case['name']}: missing check {expect['quality_check_id']}"
+                if "quality_check_status" in expect:
+                    assert matched[0]["status"] == expect["quality_check_status"], case["name"]
+    finally:
+        (
+            Config.ENABLE_LLM_INSIGHTS,
+            Config.LLM_PROVIDER,
+            Config.LLM_API_KEY,
+        ) = original_llm_config
+        clear_preview_cache()
 
 
 def test_dataset_fit_analysis_uses_snapshot_when_catalog_missing() -> None:
@@ -661,6 +966,37 @@ def test_theme_inference_recovers_mislabelled_catalog_records() -> None:
         assert theme_id in candidate["themes"], candidate
 
 
+def test_scored_recommendations_keep_english_catalog_text() -> None:
+    candidates = [
+        {
+            "dataset_id": "madrid_green_space",
+            "title": "Superficie de parques y zonas verdes de Madrid",
+            "title_original": "Superficie de parques y zonas verdes de Madrid",
+            "title_en": "Park and green area surface of Madrid",
+            "description": "Datos sobre zonas verdes urbanas por distrito.",
+            "description_original": "Datos sobre zonas verdes urbanas por distrito.",
+            "description_en": "Data about urban green areas by district.",
+            "matching_themes": ["green_space"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "source": "madrid_ckan",
+            "search_rank": 0,
+        }
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"green_space": 1.0},
+        extracted_themes=["green_space"],
+    )
+    assert scored[0]["title_en"] == "Park and green area surface of Madrid"
+    assert scored[0]["description_en"] == "Data about urban green areas by district."
+
+    item = recommendation_to_item(scored[0])
+    assert item.title == "Park and green area surface of Madrid"
+    assert item.title_original == "Superficie de parques y zonas verdes de Madrid"
+    assert item.description == "Data about urban green areas by district."
+
+
 def test_scoring_promotes_coverage_for_multi_theme_indicators() -> None:
     candidates = [
         {
@@ -691,7 +1027,10 @@ def test_scoring_promotes_coverage_for_multi_theme_indicators() -> None:
         for theme in recommendation["matching_themes"]
     }
     assert first_two_themes == {"air_quality", "green_space"}
-    assert scored[0]["dataset_id"] == "green_space_surface"
+    assert {recommendation["dataset_id"] for recommendation in scored[:2]} == {
+        "air_quality_context",
+        "green_space_surface",
+    }
 
 
 def test_selected_theme_representatives_are_essential() -> None:
@@ -725,6 +1064,306 @@ def test_selected_theme_representatives_are_essential() -> None:
         for theme in recommendation["matching_themes"]
     }
     assert essentials_by_theme == {"air_quality", "green_space"}
+
+
+def test_compatibility_prefers_recent_publication_when_no_time_is_requested() -> None:
+    candidates = [
+        {
+            "dataset_id": "old_green_space",
+            "title": "Green Space Surface",
+            "description": "Green space area and resident population by district.",
+            "matching_themes": ["green_space", "population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2018-01-01",
+        },
+        {
+            "dataset_id": "recent_green_space",
+            "title": "Green Space Surface",
+            "description": "Green space area and resident population by district.",
+            "matching_themes": ["green_space", "population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2026-04-01",
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"green_space": 1.0, "population": 1.0},
+        extracted_themes=["green_space", "population"],
+        indicator_text="Green space area per resident by district",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["recent_green_space"]["compatibility_score"] > by_id["old_green_space"]["compatibility_score"]
+    assert "no specific year" in by_id["recent_green_space"]["compatibility_reason"]
+
+
+def test_compatibility_prefers_publication_nearest_requested_year() -> None:
+    candidates = [
+        {
+            "dataset_id": "current_population",
+            "title": "Population Counts",
+            "description": "Resident population counts by district.",
+            "matching_themes": ["population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2026-01-01",
+        },
+        {
+            "dataset_id": "baseline_population",
+            "title": "Population Counts",
+            "description": "Resident population counts by district.",
+            "matching_themes": ["population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2020-06-01",
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"population": 1.0},
+        extracted_themes=["population"],
+        indicator_text="Resident population by district for the 2020 baseline",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["baseline_population"]["compatibility_score"] > by_id["current_population"]["compatibility_score"]
+    assert "requested 2020" in by_id["baseline_population"]["compatibility_reason"]
+
+
+def test_compatibility_uses_matching_title_year_before_publication_date() -> None:
+    candidates = [
+        {
+            "dataset_id": "title_2020_population",
+            "title": "Population Counts Census 2020",
+            "description": "Resident population counts by district.",
+            "matching_themes": ["population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2026-01-01",
+        },
+        {
+            "dataset_id": "published_2026_population",
+            "title": "Population Counts Current",
+            "description": "Resident population counts by district.",
+            "matching_themes": ["population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": "2026-01-01",
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"population": 1.0},
+        extracted_themes=["population"],
+        indicator_text="Resident population by district for the 2020 baseline",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["title_2020_population"]["compatibility_score"] > by_id["published_2026_population"]["compatibility_score"]
+    assert "title indicates 2020" in by_id["title_2020_population"]["compatibility_reason"]
+    assert "used before publication date" in by_id["title_2020_population"]["compatibility_reason"]
+
+
+def test_compatibility_prefers_requested_update_cadence() -> None:
+    candidates = [
+        {
+            "dataset_id": "annual_bus_counts",
+            "title": "Bus Stop Access",
+            "description": "Public transport access by neighborhood.",
+            "matching_themes": ["transport_networks", "accessibility_proximity"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "update_frequency": "annual",
+        },
+        {
+            "dataset_id": "monthly_bus_counts",
+            "title": "Bus Stop Access",
+            "description": "Public transport access by neighborhood.",
+            "matching_themes": ["transport_networks", "accessibility_proximity"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "update_frequency": "monthly",
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"transport_networks": 1.0, "accessibility_proximity": 1.0},
+        extracted_themes=["transport_networks", "accessibility_proximity"],
+        indicator_text="Monthly bus stop access by neighborhood",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["monthly_bus_counts"]["compatibility_score"] > by_id["annual_bus_counts"]["compatibility_score"]
+    assert "requested monthly cadence" in by_id["monthly_bus_counts"]["compatibility_reason"]
+
+
+def test_compatibility_treats_last_12_months_as_time_window_not_monthly_cadence() -> None:
+    recent_date = (date.today() - timedelta(days=45)).isoformat()
+    old_date = (date.today() - timedelta(days=900)).isoformat()
+    candidates = [
+        {
+            "dataset_id": "old_green_space",
+            "title": "Green Space Area",
+            "description": "Green space area and resident population by district.",
+            "matching_themes": ["green_space", "population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": old_date,
+            "update_frequency": "unknown",
+        },
+        {
+            "dataset_id": "recent_green_space",
+            "title": "Green Space Area",
+            "description": "Green space area and resident population by district.",
+            "matching_themes": ["green_space", "population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": recent_date,
+            "update_frequency": "unknown",
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"green_space": 1.0, "population": 1.0},
+        extracted_themes=["green_space", "population"],
+        indicator_text="Green space area per resident by district for the last 12 months",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["recent_green_space"]["compatibility_score"] > by_id["old_green_space"]["compatibility_score"]
+    assert "requested last 12 months" in by_id["recent_green_space"]["compatibility_reason"]
+    assert "requested monthly cadence" not in by_id["recent_green_space"]["compatibility_reason"]
+
+
+def test_compatibility_scores_single_theme_fit_as_high() -> None:
+    candidates = [
+        {
+            "dataset_id": "green_space_only",
+            "title": "Urban green areas",
+            "description": "Inventory of green spaces.",
+            "matching_themes": ["green_space"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": (date.today() - timedelta(days=90)).isoformat(),
+        },
+        {
+            "dataset_id": "population_only",
+            "title": "Resident population",
+            "description": "Population counts by district.",
+            "matching_themes": ["population"],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": (date.today() - timedelta(days=90)).isoformat(),
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"green_space": 1.0, "population": 1.0, "air_quality": 1.0},
+        extracted_themes=["green_space", "population", "air_quality"],
+        indicator_text="Green space area per resident within low-emission zones by district for the last 12 months",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["green_space_only"]["compatibility_score"] >= 0.88
+    assert by_id["population_only"]["compatibility_score"] <= 0.74
+    assert by_id["green_space_only"]["compatibility_band"] == "strong"
+    assert by_id["population_only"]["compatibility_band"] == "partial"
+    assert "Strong semantic/title/description match" in by_id["green_space_only"]["compatibility_reason"]
+
+
+def _load_recommendation_eval_fixtures() -> list[dict]:
+    fixture_path = Path(__file__).resolve().parents[1] / "app" / "schemas" / "recommendation_eval_fixtures.json"
+    return json.loads(fixture_path.read_text(encoding="utf-8"))
+
+
+def _score_recommendation_eval_case(case: dict) -> dict[str, dict]:
+    theme_confidence = case.get("theme_confidence") or {
+        theme_id: 1.0 for theme_id in case.get("extracted_themes", [])
+    }
+    scored = score_candidate_recommendations(
+        candidates=case["candidates"],
+        theme_confidence=theme_confidence,
+        extracted_themes=case["extracted_themes"],
+        indicator_text=case.get("indicator_text", ""),
+    )
+    return {item["dataset_id"]: item for item in scored}
+
+
+def test_recommendation_eval_fixtures_from_json() -> None:
+    for case in _load_recommendation_eval_fixtures():
+        by_id = _score_recommendation_eval_case(case)
+        max_bad = float(case.get("max_score_for_must_not", 0.74))
+
+        for dataset_id in case.get("must_not_recommend", []):
+            assert dataset_id in by_id, f"{case['name']}: missing candidate {dataset_id}"
+            assert by_id[dataset_id]["compatibility_score"] <= max_bad, (
+                f"{case['name']}: {dataset_id} scored too high "
+                f"({by_id[dataset_id]['compatibility_score']})"
+            )
+            assert by_id[dataset_id]["compatibility_band"] != "strong", (
+                f"{case['name']}: {dataset_id} should not be strong"
+            )
+
+        for dataset_id in case.get("must_rank_high", []):
+            assert dataset_id in by_id, f"{case['name']}: missing candidate {dataset_id}"
+            assert by_id[dataset_id]["compatibility_score"] >= COMPATIBILITY_STRONG_MIN, (
+                f"{case['name']}: {dataset_id} should score strong "
+                f"({by_id[dataset_id]['compatibility_score']})"
+            )
+            assert by_id[dataset_id]["compatibility_band"] == "strong"
+
+        for higher_id, lower_id in case.get("must_rank_before", []):
+            assert by_id[higher_id]["compatibility_score"] >= by_id[lower_id]["compatibility_score"], (
+                f"{case['name']}: expected {higher_id} to rank above {lower_id}"
+            )
+
+
+def test_compatibility_does_not_boost_loose_generic_theme_matches() -> None:
+    candidates = [
+        {
+            "dataset_id": "served_population_bibliobus",
+            "title": "Regional Bibliobus Service. Population served",
+            "description": "Mobile library service usage statistics.",
+            "themes": ["population", "air_quality"],
+            "matching_themes": ["population"],
+            "primary_category": "Population",
+            "categories": [{"Population": 1.0}, {"Environment": 0.85}],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": (date.today() - timedelta(days=90)).isoformat(),
+        },
+        {
+            "dataset_id": "media_access_sports",
+            "title": "Persons accessing sporting events through audiovisual media",
+            "description": "Attendance and audiovisual media access by education level.",
+            "themes": ["accessibility_proximity", "population"],
+            "matching_themes": ["accessibility_proximity", "population"],
+            "primary_category": "Population",
+            "categories": [{"Population": 1.0}],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": (date.today() - timedelta(days=90)).isoformat(),
+        },
+        {
+            "dataset_id": "economic_activity_parks",
+            "title": "Census of Economic Activity Parks with asbestos",
+            "description": "Business park asbestos inventory by municipality.",
+            "themes": ["green_space", "population"],
+            "matching_themes": ["green_space", "population"],
+            "primary_category": "Population",
+            "categories": [{"Population": 1.0}, {"Environment": 0.85}],
+            "quality": {"completeness": 0.8, "timeliness": 0.75, "consistency": 0.7, "documentation": 0.65},
+            "publication_date": (date.today() - timedelta(days=90)).isoformat(),
+        },
+    ]
+
+    scored = score_candidate_recommendations(
+        candidates=candidates,
+        theme_confidence={"population": 1.0, "accessibility_proximity": 1.0},
+        extracted_themes=["population", "accessibility_proximity"],
+        indicator_text="Older adults within 800 meters walking distance of metro stations by census tract",
+    )
+    by_id = {item["dataset_id"]: item for item in scored}
+
+    assert by_id["served_population_bibliobus"]["compatibility_score"] < 0.88
+    assert by_id["media_access_sports"]["compatibility_score"] < 0.88
+    assert by_id["economic_activity_parks"]["compatibility_score"] < 0.88
+    assert by_id["media_access_sports"]["is_essential"] is False
+    assert by_id["economic_activity_parks"]["is_essential"] is False
 
 
 def test_theme_coverage_prefers_madrid_representatives() -> None:
@@ -848,6 +1487,43 @@ def test_full_catalog_cache_storage_contract() -> None:
         assert len(cached) == 1
         assert cached[0].dataset_id == dataset.dataset_id
         assert cached[0].quality.completeness == dataset.quality.completeness
+
+
+def test_full_catalog_import_cancel_queued_job() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache_base = Path(tmpdir) / "cache"
+        manager = FullCatalogImportManager(cache_base_dir=cache_base)
+        progress, scheduled = manager.start("madrid_ckan")
+        assert scheduled
+        assert progress.status == "queued"
+
+        cancelled = manager.request_cancel("madrid_ckan")
+        assert cancelled.status == "cancelled"
+        assert cancelled.finished_at
+        assert "planning question" in (cancelled.last_error or "").lower()
+
+
+def test_cancel_active_full_catalog_imports_endpoint() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cache_base = Path(tmpdir) / "cache"
+        original_cache_base = FULL_IMPORT_MANAGER.cache_base_dir
+        original_progress = dict(FULL_IMPORT_MANAGER._progress)
+        try:
+            FULL_IMPORT_MANAGER.cache_base_dir = cache_base
+            FULL_IMPORT_MANAGER._progress.clear()
+            FULL_IMPORT_MANAGER.start("madrid_ckan")
+
+            response = client.post("/import/full/cancel-active")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert "madrid_ckan" in payload["cancelled_sources"]
+
+            progress = FULL_IMPORT_MANAGER.get_progress("madrid_ckan")
+            assert progress.status == "cancelled"
+        finally:
+            FULL_IMPORT_MANAGER.cache_base_dir = original_cache_base
+            FULL_IMPORT_MANAGER._progress.clear()
+            FULL_IMPORT_MANAGER._progress.update(original_progress)
 
 
 def test_orphaned_full_import_manifest_is_retryable() -> None:
@@ -979,6 +1655,10 @@ if __name__ == "__main__":
     test_package_contract_for_imported_ids()
     test_dataset_preview_contract()
     test_dataset_fit_analysis_contract_heuristic()
+    test_preview_missingness_helper()
+    test_dataset_fit_eda_flags_preview_missingness()
+    test_fit_analysis_fetches_when_no_sample()
+    test_dataset_fit_eval_fixtures_from_json()
     test_dataset_fit_analysis_uses_snapshot_when_catalog_missing()
     test_dataset_fit_analysis_counts_water_management_coverage()
     test_unmapped_catalog_records_do_not_default_to_population()
@@ -987,12 +1667,23 @@ if __name__ == "__main__":
     test_legacy_population_cache_fallback_is_repaired()
     test_theme_fixture_contract()
     test_theme_inference_recovers_mislabelled_catalog_records()
+    test_scored_recommendations_keep_english_catalog_text()
     test_scoring_promotes_coverage_for_multi_theme_indicators()
     test_selected_theme_representatives_are_essential()
+    test_compatibility_prefers_recent_publication_when_no_time_is_requested()
+    test_compatibility_prefers_publication_nearest_requested_year()
+    test_compatibility_uses_matching_title_year_before_publication_date()
+    test_compatibility_prefers_requested_update_cadence()
+    test_compatibility_treats_last_12_months_as_time_window_not_monthly_cadence()
+    test_compatibility_scores_single_theme_fit_as_high()
+    test_compatibility_does_not_boost_loose_generic_theme_matches()
+    test_recommendation_eval_fixtures_from_json()
     test_theme_coverage_prefers_madrid_representatives()
     test_scoring_thresholds_and_risk_signals()
     test_clear_import_contract()
     test_full_catalog_cache_storage_contract()
+    test_full_catalog_import_cancel_queued_job()
+    test_cancel_active_full_catalog_imports_endpoint()
     test_orphaned_full_import_manifest_is_retryable()
     test_existing_local_catalog_file_marks_source_available()
     test_full_catalog_import_endpoint_and_cache_search()

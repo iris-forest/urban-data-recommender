@@ -24,9 +24,14 @@ from .storage import (
 logger = logging.getLogger(__name__)
 
 FULL_IMPORT_SOURCES = {"madrid_ckan", "datos_gob_es"}
-TERMINAL_STATUSES = {"completed", "failed"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "running"}
 STALE_CACHE_AFTER = timedelta(days=7)
+CANCEL_MESSAGE = "Stopped so the planning question analysis can run."
+
+
+class FullCatalogImportCancelled(Exception):
+    """Raised when a background import should stop between pages."""
 
 
 def _utc_now() -> str:
@@ -85,6 +90,7 @@ class FullCatalogImportManager:
     def __init__(self, cache_base_dir: Optional[Path] = None) -> None:
         self.cache_base_dir = cache_base_dir
         self._progress: Dict[str, FullCatalogImportProgress] = {}
+        self._cancel_requested: Dict[str, bool] = {}
         self._lock = Lock()
 
     def validate_source(self, source: str) -> str:
@@ -121,6 +127,7 @@ class FullCatalogImportManager:
                 manifest_path=str(get_cache_manifest_path(self.cache_base_dir)),
             )
             self._progress[source] = progress
+            self._cancel_requested[source] = False
 
         self._persist_progress(progress)
         return progress, True
@@ -141,12 +148,52 @@ class FullCatalogImportManager:
                 manifest_path=str(get_cache_manifest_path(self.cache_base_dir)),
             )
             self._progress[source] = progress
+            self._cancel_requested[source] = False
 
         self._persist_progress(progress)
         return progress, True
 
+    def request_cancel(self, source: str) -> FullCatalogImportProgress:
+        """Request cancellation for a queued or running full-catalog import."""
+        source = self.validate_source(source)
+        with self._lock:
+            self._cancel_requested[source] = True
+            current = self._progress.get(source)
+
+        if current and current.status == "queued":
+            progress = self._set_progress(
+                source,
+                status="cancelled",
+                finished_at=_utc_now(),
+                last_error=CANCEL_MESSAGE,
+            )
+            self._persist_progress(progress)
+            self._clear_cancel_requested(source)
+            return progress
+
+        return self.get_progress(source)
+
+    def cancel_all_active(self) -> List[str]:
+        """Request cancellation for every queued or running import job."""
+        with self._lock:
+            active_sources = [
+                source
+                for source, progress in self._progress.items()
+                if progress.status in ACTIVE_STATUSES
+            ]
+
+        cancelled: List[str] = []
+        for source in active_sources:
+            self.request_cancel(source)
+            cancelled.append(source)
+        return cancelled
+
     def run(self, source: str) -> None:
         source = self.validate_source(source)
+        if self._is_cancel_requested(source):
+            self._mark_cancelled(source)
+            return
+
         progress = self._set_progress(
             source,
             status="running",
@@ -171,6 +218,9 @@ class FullCatalogImportManager:
 
         try:
             for page in self._iter_pages(source):
+                if self._is_cancel_requested(source):
+                    raise FullCatalogImportCancelled(CANCEL_MESSAGE)
+
                 write_raw_cache_snapshot(
                     source=source,
                     snapshot_name=page.snapshot_name,
@@ -227,6 +277,9 @@ class FullCatalogImportManager:
             )
             self._persist_progress(progress)
             logger.info("Full catalog import completed for %s: %s records", source, len(normalized))
+        except FullCatalogImportCancelled as exc:
+            logger.info("Full catalog import cancelled for %s", source)
+            self._mark_cancelled(source, message=str(exc))
         except Exception as exc:
             logger.exception("Full catalog import failed for %s", source)
             progress = self._set_progress(
@@ -244,6 +297,10 @@ class FullCatalogImportManager:
     def rebuild_from_raw(self, source: str) -> None:
         """Rebuild normalized Dataset JSONL from cached raw API snapshots."""
         source = self.validate_source(source)
+        if self._is_cancel_requested(source):
+            self._mark_cancelled(source)
+            return
+
         progress = self._set_progress(
             source,
             status="running",
@@ -272,6 +329,9 @@ class FullCatalogImportManager:
                 raise ValueError("No raw cache snapshots are available to rebuild from.")
 
             for index, (path, payload) in enumerate(snapshots):
+                if self._is_cancel_requested(source):
+                    raise FullCatalogImportCancelled(CANCEL_MESSAGE)
+
                 page = self._normalize_raw_snapshot(source, path, payload, index)
                 fetched_count += page.fetched_count
                 total_count = page.total_count if page.total_count is not None else total_count
@@ -320,6 +380,9 @@ class FullCatalogImportManager:
             )
             self._persist_progress(progress)
             logger.info("Full catalog cache rebuilt for %s: %s records", source, len(normalized))
+        except FullCatalogImportCancelled as exc:
+            logger.info("Full catalog cache rebuild cancelled for %s", source)
+            self._mark_cancelled(source, message=str(exc))
         except Exception as exc:
             logger.exception("Full catalog cache rebuild failed for %s", source)
             progress = self._set_progress(
@@ -361,6 +424,25 @@ class FullCatalogImportManager:
                 snapshot_name=path.stem,
             )
         raise ValueError(f"Unsupported full catalog source '{source}'")
+
+    def _is_cancel_requested(self, source: str) -> bool:
+        with self._lock:
+            return self._cancel_requested.get(source, False)
+
+    def _clear_cancel_requested(self, source: str) -> None:
+        with self._lock:
+            self._cancel_requested.pop(source, None)
+
+    def _mark_cancelled(self, source: str, message: str = CANCEL_MESSAGE) -> FullCatalogImportProgress:
+        progress = self._set_progress(
+            source,
+            status="cancelled",
+            finished_at=_utc_now(),
+            last_error=message,
+        )
+        self._persist_progress(progress)
+        self._clear_cancel_requested(source)
+        return progress
 
     def _set_progress(self, source: str, **changes: Any) -> FullCatalogImportProgress:
         with self._lock:

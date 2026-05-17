@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { Textarea } from "./ui/textarea";
 import { Button } from "./ui/button";
@@ -22,6 +22,7 @@ import {
 import { appStore } from "../store";
 import {
   analyzeIndicator,
+  cancelActiveBackgroundJobs,
   convertApiResponseToIndicatorRequest,
   clearImportedSource,
   FullCatalogImportProgressResponse,
@@ -79,6 +80,16 @@ const EXAMPLE_SUBJECTS = [
   "Cycling network coverage",
 ];
 
+function analyzeErrorHint(error: string): string {
+  if (error.includes("longer than")) {
+    return "The backend is reachable, but it may still be reloading or working through a slow request. Wait a moment and try again.";
+  }
+  if (error.includes("Failed to fetch")) {
+    return "The browser could not reach the configured backend API. Check that the backend server is running on the configured port.";
+  }
+  return "If this keeps happening, check the backend terminal for the underlying error.";
+}
+
 const EXAMPLE_CONDITIONS = [
   "within 5 minutes walking distance from a bus stop",
   "within 300 meters of a public park",
@@ -107,6 +118,94 @@ const EXAMPLE_TIME_FRAMES = [
   "compared with the previous year",
 ];
 
+const BACKEND_SOURCE_BY_API_ID: Record<string, string> = {
+  "madrid-ckan": "madrid_ckan",
+  "datos-gob-es": "datos_gob_es",
+};
+
+type UnifiedSourceStatus =
+  | "not_imported"
+  | "importing"
+  | "saved_locally"
+  | "stale"
+  | "failed"
+  | "cancelled";
+
+function resolveUnifiedSourceStatus(
+  progress?: FullCatalogImportProgressResponse,
+  isConnected = false
+): UnifiedSourceStatus {
+  if (!progress || progress.status === "idle") {
+    return isConnected ? "saved_locally" : "not_imported";
+  }
+  if (progress.status === "queued" || progress.status === "running") return "importing";
+  if (progress.status === "cancelled") return "cancelled";
+  if (progress.status === "failed") return "failed";
+  if (progress.status === "completed") {
+    return progress.is_stale ? "stale" : "saved_locally";
+  }
+  return isConnected ? "saved_locally" : "not_imported";
+}
+
+function unifiedSourceStatusLabel(status: UnifiedSourceStatus): string {
+  switch (status) {
+    case "not_imported":
+      return "Not imported";
+    case "importing":
+      return "Importing";
+    case "saved_locally":
+      return "Saved locally";
+    case "stale":
+      return "Saved locally (update recommended)";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Stopped";
+    default:
+      return status;
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function markRunningImportsCancelled(
+  progressByApi: Record<string, FullCatalogImportProgressResponse>
+): Record<string, FullCatalogImportProgressResponse> {
+  const next = { ...progressByApi };
+  for (const [apiId, progress] of Object.entries(next)) {
+    if (progress?.status === "queued" || progress?.status === "running") {
+      next[apiId] = {
+        ...progress,
+        status: "cancelled",
+        finished_at: new Date().toISOString(),
+        last_error: "Stopped so the planning question analysis can run.",
+      };
+    }
+  }
+  return next;
+}
+
+function applyCancelledImportProgress(
+  progressByApi: Record<string, FullCatalogImportProgressResponse>,
+  cancelledBackendSources: string[]
+): Record<string, FullCatalogImportProgressResponse> {
+  const next = markRunningImportsCancelled(progressByApi);
+  for (const api of AVAILABLE_APIS) {
+    const backendSource = BACKEND_SOURCE_BY_API_ID[api.id];
+    if (backendSource && cancelledBackendSources.includes(backendSource) && next[api.id]) {
+      next[api.id] = {
+        ...next[api.id],
+        status: "cancelled",
+        finished_at: next[api.id].finished_at || new Date().toISOString(),
+        last_error: "Stopped so the planning question analysis can run.",
+      };
+    }
+  }
+  return next;
+}
+
 export function InputScreen() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -115,6 +214,7 @@ export function InputScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(() => getTabFromSearch(location.search));
+  const [showPrivacyNotice, setShowPrivacyNotice] = useState(false);
   const [importedApis, setImportedApis] = useState<Set<string>>(new Set());
   const [isImporting, setIsImporting] = useState<string | null>(null);
   const [isStartingFullImport, setIsStartingFullImport] = useState<string | null>(null);
@@ -132,9 +232,24 @@ export function InputScreen() {
     if (saved.length > 0) return new Set(saved);
     return new Set(AVAILABLE_APIS.filter((api) => api.id !== "geoportal").map((api) => api.id));
   });
+  const backgroundOpsRef = useRef<AbortController | null>(null);
+
+  const abortBackgroundRequests = () => {
+    backgroundOpsRef.current?.abort();
+    backgroundOpsRef.current = new AbortController();
+  };
+
+  const getBackgroundSignal = () => backgroundOpsRef.current?.signal;
 
   // First-run source defaults keep supported catalogs active while clearly
   // leaving unsupported sources disabled.
+  useEffect(() => {
+    backgroundOpsRef.current = new AbortController();
+    return () => {
+      backgroundOpsRef.current?.abort();
+    };
+  }, []);
+
   useEffect(() => {
     if (appStore.getActiveApiSources().length === 0) {
       AVAILABLE_APIS.forEach((api) => appStore.setApiSourceActive(api.id, api.id !== "geoportal"));
@@ -171,6 +286,7 @@ export function InputScreen() {
     if (!progress || progress.status === "idle") return "Not saved locally";
     if (progress.status === "queued") return "Queued";
     if (progress.status === "running") return "Importing";
+    if (progress.status === "cancelled") return "Stopped";
     if (progress.status === "completed") return progress.is_stale ? "Saved locally, update recommended" : "Saved locally";
     if (progress.status === "failed") return "Failed";
     return progress.status;
@@ -200,13 +316,16 @@ export function InputScreen() {
       return getLocalCatalogUpdatedLabel(progress) || "Saved locally";
     }
     if (progress?.status === "queued" || progress?.status === "running") return "Import in progress";
+    if (progress?.status === "cancelled") return "Import stopped";
     if (progress?.status === "failed") return "Import failed";
     return "Not synced yet";
   };
 
   const refreshFullImportProgress = async (apiId: string) => {
     if (!isApiSupportedForImport(apiId)) return;
-    const progress = await getFullCatalogImportProgress(apiId);
+    const progress = await getFullCatalogImportProgress(apiId, {
+      signal: getBackgroundSignal(),
+    });
     setFullImportProgress((prev) => ({ ...prev, [apiId]: progress }));
 
     if (progress.status === "completed" && progress.normalized_count > 0) {
@@ -221,15 +340,23 @@ export function InputScreen() {
   };
 
   useEffect(() => {
-    // The import tab refreshes background full-catalog job status on entry so
-    // users can tell whether each source is already saved locally.
-    if (activeTab !== "import") return;
+    // Refresh catalog job status on the import tab, and lightly on analyze while imports run.
+    const hasRunningImports = Object.values(fullImportProgress).some(
+      (progress) => progress?.status === "queued" || progress?.status === "running"
+    );
+    if (activeTab !== "import" && !hasRunningImports) return;
     let cancelled = false;
 
     const loadProgress = async () => {
       const supported = AVAILABLE_APIS.filter((api) => isApiSupportedForImport(api.id));
       const results = await Promise.allSettled(
-        supported.map(async (api) => [api.id, await getFullCatalogImportProgress(api.id)] as const)
+        supported.map(
+          async (api) =>
+            [
+              api.id,
+              await getFullCatalogImportProgress(api.id, { signal: getBackgroundSignal() }),
+            ] as const
+        )
       );
 
       if (cancelled) return;
@@ -282,7 +409,7 @@ export function InputScreen() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab]);
+  }, [activeTab, fullImportProgress]);
 
   useEffect(() => {
     // Running imports are polled lightly until they finish or fail.
@@ -316,7 +443,7 @@ export function InputScreen() {
     setIsImporting(apiId);
     try {
       // Call backend to import and persist datasets from this source
-      const response = await importApiSource(apiId);
+      const response = await importApiSource(apiId, { signal: getBackgroundSignal() });
       const importedCount = Number(response?.imported_count ?? 0);
 
       console.debug("[InputScreen.ImportApi] Completed", {
@@ -352,6 +479,7 @@ export function InputScreen() {
         },
       }));
     } catch (err) {
+      if (isAbortError(err)) return;
       console.error("Error importing API:", err);
       const message = err instanceof Error ? err.message : "Import failed";
       setSourceImportStatus((prev) => ({
@@ -371,7 +499,7 @@ export function InputScreen() {
 
     setIsStartingFullImport(apiId);
     try {
-      const progress = await startFullCatalogImport(apiId);
+      const progress = await startFullCatalogImport(apiId, { signal: getBackgroundSignal() });
       setFullImportProgress((prev) => ({ ...prev, [apiId]: progress }));
       appStore.setApiSourceActive(apiId, true);
       setActiveApiSources((prev) => new Set([...prev, apiId]));
@@ -384,6 +512,7 @@ export function InputScreen() {
         },
       }));
     } catch (err) {
+      if (isAbortError(err)) return;
       const message = err instanceof Error ? err.message : "Full catalog import failed to start";
       setSourceImportStatus((prev) => ({
         ...prev,
@@ -399,7 +528,7 @@ export function InputScreen() {
 
     setIsRebuildingFullImport(apiId);
     try {
-      const progress = await rebuildFullCatalogCache(apiId);
+      const progress = await rebuildFullCatalogCache(apiId, { signal: getBackgroundSignal() });
       setFullImportProgress((prev) => ({ ...prev, [apiId]: progress }));
       setSourceImportStatus((prev) => ({
         ...prev,
@@ -410,6 +539,7 @@ export function InputScreen() {
         },
       }));
     } catch (err) {
+      if (isAbortError(err)) return;
       const message = err instanceof Error ? err.message : "Local catalog rebuild failed to start";
       setSourceImportStatus((prev) => ({
         ...prev,
@@ -486,15 +616,31 @@ export function InputScreen() {
   const handleSubmit = async () => {
     if (!description.trim()) return;
 
+    abortBackgroundRequests();
+    setIsImporting(null);
+    setIsStartingFullImport(null);
+    setIsRebuildingFullImport(null);
     setIsLoading(true);
     setError(null);
 
+    const analyzeController = new AbortController();
+
     try {
+      try {
+        const cancelled = await cancelActiveBackgroundJobs();
+        setFullImportProgress((prev) =>
+          applyCancelledImportProgress(prev, cancelled.cancelled_sources)
+        );
+      } catch (cancelErr) {
+        console.warn("[InputScreen] Failed to cancel background imports:", cancelErr);
+        setFullImportProgress((prev) => markRunningImportsCancelled(prev));
+      }
+
       // The backend parses the free-text indicator and the client normalizes
       // the response into the shared workflow store for later steps.
       const analyzeResponse = normalizeAnalyzeResponse(
         description,
-        await analyzeIndicator(description)
+        await analyzeIndicator(description, { signal: analyzeController.signal })
       );
 
       const indicatorRequest = convertApiResponseToIndicatorRequest(
@@ -509,8 +655,9 @@ export function InputScreen() {
 
       navigate("/overview");
     } catch (err) {
+      if (isAbortError(err)) return;
       const message =
-        err instanceof Error ? err.message : "Failed to analyze indicator";
+        err instanceof Error ? err.message : "Failed to analyze planning question";
       setError(message);
       console.error("Error analyzing indicator:", err);
     } finally {
@@ -537,22 +684,25 @@ export function InputScreen() {
       <div className="w-full max-w-4xl">
         <div className="bg-white rounded-lg shadow-sm border border-neutral-200 p-8">
           <div className="mb-6">
-            <h1 className="text-2xl mb-2">Madrid Urban Planning Data Assistant</h1>
+            <h1 className="text-2xl mb-2">Madrid Dataset Recommender</h1>
             <p className="text-neutral-600">
-              Describe your indicator or explore available datasets.
+              Describe the planning question or indicator you are working on. The tool searches
+              open-data catalogs, matches datasets, and helps you review them before you download
+              and analyze the sources yourself. It does not build the measure or verify full
+              datasets for you.
             </p>
           </div>
 
           <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="grid w-full grid-cols-2 mb-6">
-              <TabsTrigger value="analyze">Analyze Indicator</TabsTrigger>
-              <TabsTrigger value="import">Import Data Sources</TabsTrigger>
+              <TabsTrigger value="analyze">Analyze Planning Question</TabsTrigger>
+              <TabsTrigger value="import">Data sources</TabsTrigger>
             </TabsList>
 
             {/* Tab 1: Analyze Indicator */}
             <TabsContent value="analyze" className="space-y-6">
               <div className="space-y-2">
-                <Label htmlFor="indicator-description">Indicator Description</Label>
+                <Label htmlFor="indicator-description">Planning Question</Label>
                 <Textarea
                   id="indicator-description"
                   placeholder="Example: Share of residents within 5 minutes walking distance from a bus stop in a given neighborhood."
@@ -569,7 +719,7 @@ export function InputScreen() {
                   <div>
                     <p className="text-red-900 text-sm">{error}</p>
                     <p className="text-red-800 text-xs mt-1">
-                      Make sure the backend API is running on port 8000
+                      {analyzeErrorHint(error)}
                     </p>
                   </div>
                 </div>
@@ -579,7 +729,7 @@ export function InputScreen() {
                 <Lightbulb className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                 <div className="text-sm">
                   <p className="text-blue-900 mb-2">
-                    <strong>Tip:</strong> Describe your indicator clearly, including:
+                    <strong>Tip:</strong> Describe your planning measure clearly, including:
                   </p>
                   <ul className="text-blue-800 space-y-1 list-disc list-inside">
                     <li>What you want to measure (e.g., accessibility, density, proximity)</li>
@@ -587,6 +737,26 @@ export function InputScreen() {
                     <li>Any specific thresholds (e.g., 5 minutes, 500 meters)</li>
                   </ul>
                 </div>
+              </div>
+
+              <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4 text-sm text-neutral-700">
+                <button
+                  type="button"
+                  className="flex w-full min-w-0 items-center justify-between gap-4 text-left"
+                  onClick={() => setShowPrivacyNotice((current) => !current)}
+                  aria-expanded={showPrivacyNotice}
+                  aria-controls="privacy-governance-details"
+                >
+                  <span className="font-medium text-neutral-900">Privacy and governance</span>
+                  <ChevronDown
+                    className={`h-4 w-4 flex-shrink-0 text-neutral-500 transition-transform ${showPrivacyNotice ? "rotate-180" : ""}`}
+                  />
+                </button>
+                {showPrivacyNotice && (
+                  <p id="privacy-governance-details" className="mt-3">
+                    Your planning question, selections, automated analysis, and domain notes stay in this browser session unless you export them. Imported catalog metadata is cached locally by the backend; there is no authenticated report history or share link in this version.
+                  </p>
+                )}
               </div>
 
               <div className="flex gap-3">
@@ -603,9 +773,11 @@ export function InputScreen() {
                 <Button
                   onClick={handleSubmit}
                   disabled={!description.trim() || isLoading}
-                  className="flex-1"
+                  className="flex-1 gap-2"
+                  aria-busy={isLoading}
                 >
-                  {isLoading ? "Analyzing..." : "Continue"}
+                  {isLoading && <Loader className="w-4 h-4 animate-spin" />}
+                  Continue
                 </Button>
               </div>
             </TabsContent>
@@ -615,7 +787,8 @@ export function InputScreen() {
               <div className="space-y-2">
                 <Label>Available Data Sources</Label>
                 <p className="text-sm text-neutral-600">
-                  Import datasets from external APIs and data portals to expand the available catalog.
+                  Connect a source for a quick sync, or import the full catalog into the local cache used by recommendations.
+                  Quick sync updates the working catalog; full import saves paginated source files for faster repeat searches.
                 </p>
               </div>
 
@@ -633,6 +806,8 @@ export function InputScreen() {
                   const fullCanRebuild = (fullProgress?.raw_snapshot_count ?? 0) > 0;
                   const fullProgressValue = getFullImportProgressValue(fullProgress);
                   const localCatalogUpdatedLabel = getLocalCatalogUpdatedLabel(fullProgress);
+                  const unifiedStatus = resolveUnifiedSourceStatus(fullProgress, isConnected);
+                  const unifiedStatusText = unifiedSourceStatusLabel(unifiedStatus);
 
                   return (
                   <Card key={api.id} className="overflow-hidden">
@@ -654,6 +829,9 @@ export function InputScreen() {
                               <Badge variant={isActive ? "default" : "secondary"}>
                                 {isActive ? "Active" : "Inactive"}
                               </Badge>
+                              {isImportSupported && (
+                                <Badge variant="outline">{unifiedStatusText}</Badge>
+                              )}
                             </div>
                             <div className="mt-1 flex items-center gap-2 text-xs text-neutral-600">
                               <ExternalLink className="h-3.5 w-3.5 flex-shrink-0" />
@@ -758,11 +936,14 @@ export function InputScreen() {
                             <div className="mt-3 rounded-md border border-neutral-200 bg-neutral-50 p-3">
                               <div className="mb-2 flex items-center justify-between gap-3">
                                 <div>
-                                  <p className="text-xs font-medium text-neutral-700">Local catalog</p>
+                                  <p className="text-xs font-medium text-neutral-700">Local catalog cache</p>
                                   <p className="text-xs text-neutral-500">
-                                    {getFullImportStatusLabel(fullProgress)}
+                                    {unifiedStatusText}
                                     {fullProgress?.normalized_count
-                                      ? ` - ${fullProgress.normalized_count.toLocaleString()} datasets`
+                                      ? ` · ${fullProgress.normalized_count.toLocaleString()} datasets indexed`
+                                      : ""}
+                                    {fullProgress?.cache_updated_at
+                                      ? ` · cache updated ${getProgressDateLabel(fullProgress.cache_updated_at) || ""}`
                                       : ""}
                                   </p>
                                   {localCatalogUpdatedLabel && (
@@ -772,7 +953,7 @@ export function InputScreen() {
                                   )}
                                 </div>
                                 <Badge variant={fullProgress?.status === "failed" ? "destructive" : "secondary"}>
-                                  {getFullImportStatusLabel(fullProgress)}
+                                  {unifiedStatusText}
                                 </Badge>
                               </div>
                               <Progress value={fullProgressValue} className="mb-3" />
@@ -888,7 +1069,7 @@ export function InputScreen() {
 
               <div className="bg-neutral-50 border border-neutral-200 rounded-lg p-4">
                 <p className="text-xs text-neutral-600 mb-2">
-                  <strong>Info:</strong> Importing a data source will fetch and integrate datasets from that API into your catalog. You can then search for and select them when analyzing indicators.
+                  <strong>Info:</strong> Importing a data source fetches catalog metadata into the backend's local cache. You can then search for and select those datasets when analyzing planning questions.
                 </p>
               </div>
             </TabsContent>
@@ -896,7 +1077,7 @@ export function InputScreen() {
         </div>
 
         <div className="mt-6 text-center text-sm text-neutral-500">
-          Step 1 of 5: {activeTab === "analyze" ? "Describe your indicator" : "Import data sources"}
+          Step 1 of 5: {activeTab === "analyze" ? "Describe your planning question" : "Data sources"}
         </div>
       </div>
     </div>

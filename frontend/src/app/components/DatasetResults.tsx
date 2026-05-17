@@ -27,9 +27,10 @@ import {
   CheckCircle2,
   Circle,
   Eye,
+  HelpCircle,
   LayoutGrid,
   List,
-  Loader
+  Loader,
 } from "lucide-react";
 import { DatasetCard } from "./DatasetCard";
 import { DatasetDetailPanel } from "./DatasetDetailPanel";
@@ -40,78 +41,50 @@ import {
   convertApiDatasetToReactDataset,
   extractYearFromDate,
 } from "../api";
-import { getCompletenessColorClass } from "../qualityDisplay";
+import {
+  technicalQualityScore,
+} from "../qualityDisplay";
+import { formatThemeName, getCatalogMainCategoryLabels, getDatasetCategoryDisplay } from "../themeTaxonomy";
+import {
+  compatibilityScoreClass as datasetCompatibilityScoreClass,
+  formatCompatibilityScore as formatDatasetCompatibilityScore,
+  formatCompatibilityTooltip,
+  getDatasetCompatibilityScore,
+} from "../compatibilityDisplay";
 
 type DatasetViewMode = "cards" | "table";
 
 const RECOMMENDATION_LOADING_STATUSES = [
   "Reading your selected data themes...",
   "Searching imported and cached catalogs...",
-  "Matching datasets to the indicator text...",
-  "Scoring relevance and data quality...",
-  "Pre-selecting essential datasets...",
+  "Matching datasets to the planning question...",
+  "Ranking datasets by fit to your question...",
+  "Applying evidence and geography checks...",
   "Preparing the dataset list...",
 ];
 const LOADING_STATUS_ROTATION_MS = 3600;
 
-// Recommendation results can miss an essential flag for a selected theme when
-// external metadata is thin. This pass ensures each selected theme has at least
-// one strong pre-selected candidate when a matching dataset is available.
-function applySelectedThemeEssentials(
-  datasets: Dataset[],
-  selectedThemes: string[]
-): Dataset[] {
-  const selectedThemeIds = selectedThemes.map(normalizeThemeId).filter(Boolean);
-  if (selectedThemeIds.length === 0) return datasets;
-
-  const nextDatasets = datasets.map((dataset) => ({ ...dataset }));
-
-  selectedThemeIds.forEach((themeId) => {
-    const alreadyEssential = nextDatasets.some(
-      (dataset) => dataset.essential && datasetMatchesTheme(dataset, themeId)
-    );
-    if (alreadyEssential) return;
-
-    const bestMatch = nextDatasets
-      .filter((dataset) => datasetMatchesTheme(dataset, themeId))
-      .sort(compareDatasetStrength)[0];
-
-    if (bestMatch) {
-      bestMatch.essential = true;
-    }
-  });
-
-  return nextDatasets;
+function datasetCompatibilityValue(dataset: Dataset): number {
+  const score = getDatasetCompatibilityScore(dataset);
+  if (typeof score !== "number") return 0;
+  return score > 1 ? score / 100 : score;
 }
 
-function prioritizeSelectedEssentials(
-  datasets: Dataset[],
-  selectedDatasetIds: Set<string>
-): Dataset[] {
-  // Selected essentials are kept at the top so users can immediately see the
-  // datasets that will carry into the fit-review step.
-  return [...datasets].sort((a, b) => {
-    const aSelectedEssential = a.essential && selectedDatasetIds.has(a.id);
-    const bSelectedEssential = b.essential && selectedDatasetIds.has(b.id);
-    if (aSelectedEssential !== bSelectedEssential) {
-      return aSelectedEssential ? -1 : 1;
-    }
-    if (a.essential !== b.essential) return a.essential ? -1 : 1;
-    return compareDatasetStrength(a, b);
-  });
+function sortDatasetsByCompatibility(datasets: Dataset[]): Dataset[] {
+  return [...datasets].sort(compareDatasetStrength);
 }
 
-function datasetMatchesTheme(dataset: Dataset, themeId: string): boolean {
-  const datasetThemes = [
-    dataset.theme,
-    ...(dataset.themes || []),
-    ...(dataset.matchingThemes || []),
-  ].map(normalizeThemeId);
-
-  return datasetThemes.includes(themeId);
+function categoryDisplayForDataset(dataset: Dataset) {
+  return getDatasetCategoryDisplay(dataset, appStore.getExtractedThemes());
 }
 
 function compareDatasetStrength(a: Dataset, b: Dataset): number {
+  if (a.essential !== b.essential) return a.essential ? -1 : 1;
+
+  const compatibilityA = datasetCompatibilityValue(a);
+  const compatibilityB = datasetCompatibilityValue(b);
+  if (compatibilityA !== compatibilityB) return compatibilityB - compatibilityA;
+
   const scoreA = a.relevanceScore ?? 0;
   const scoreB = b.relevanceScore ?? 0;
   if (scoreA !== scoreB) return scoreB - scoreA;
@@ -124,31 +97,19 @@ function compareDatasetStrength(a: Dataset, b: Dataset): number {
 }
 
 function datasetQualityScore(dataset: Dataset): number {
-  const freshness = { recent: 1, moderate: 0.65, outdated: 0.25 }[dataset.quality.timeliness];
-  const consistency = { high: 1, medium: 0.65, low: 0.25 }[dataset.quality.consistency];
-  const documentation = { excellent: 1, good: 0.75, limited: 0.35 }[dataset.quality.documentation];
-
-  return (
-    dataset.quality.completeness / 100 +
-    freshness +
-    consistency +
-    documentation
-  ) / 4;
-}
-
-function normalizeThemeId(themeId: string): string {
-  return themeId.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return technicalQualityScore(dataset);
 }
 
 export function DatasetResults() {
   const navigate = useNavigate();
+  const indicatorRequest = appStore.getIndicatorRequest();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [filteredDatasets, setFilteredDatasets] = useState<Dataset[]>([]);
   const [selectedDatasets, setSelectedDatasets] = useState<Set<string>>(new Set());
   const [detailDataset, setDetailDataset] = useState<Dataset | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterAccess, setFilterAccess] = useState<string>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
+  const [filterSource, setFilterSource] = useState<string>("all");
   const [viewMode, setViewMode] = useState<DatasetViewMode>("table");
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 20;
@@ -185,6 +146,29 @@ export function DatasetResults() {
     return () => window.clearInterval(intervalId);
   }, [isLoading]);
 
+  const applyRecommendationDatasets = (withBackendRecommendations: Dataset[]) => {
+    const visibleIds = new Set(withBackendRecommendations.map((dataset) => dataset.id));
+    const persistedSelection = appStore
+      .getSelectedDatasets()
+      .filter((dataset) => visibleIds.has(dataset.id))
+      .map((dataset) => dataset.id);
+    const essentialDatasets = withBackendRecommendations.filter((dataset) => dataset.essential);
+    const nextSelectedIds = new Set([
+      ...persistedSelection,
+      ...essentialDatasets.map((dataset) => dataset.id),
+    ]);
+    const prioritizedDatasets = sortDatasetsByCompatibility(withBackendRecommendations);
+
+    setDatasets(prioritizedDatasets);
+    setFilteredDatasets(prioritizedDatasets);
+
+    appStore.clearSelectedDatasets();
+    prioritizedDatasets.forEach((dataset) => {
+      appStore.setDatasetSelected(dataset, nextSelectedIds.has(dataset.id));
+    });
+    setSelectedDatasets(nextSelectedIds);
+  };
+
   useEffect(() => {
     const request = appStore.getIndicatorRequest();
     if (!request) {
@@ -192,8 +176,24 @@ export function DatasetResults() {
       return;
     }
 
-    // Load recommendations once for the current indicator, then reconcile them
-    // with active source filters and any selection stored from prior navigation.
+    const controller = new AbortController();
+    let isCurrentRequest = true;
+    const cacheKey = appStore.buildRecommendationCacheKey(
+      request.description,
+      appStore.getExtractedThemes(),
+      appStore.getActiveApiSources()
+    );
+    const cachedDatasets = appStore.getRecommendationCache(cacheKey);
+
+    if (cachedDatasets) {
+      applyRecommendationDatasets(filterByActiveSources(cachedDatasets));
+      setIsLoading(false);
+      setError(null);
+      return () => {
+        isCurrentRequest = false;
+      };
+    }
+
     const loadDatasets = async () => {
       try {
         setIsLoading(true);
@@ -202,53 +202,42 @@ export function DatasetResults() {
 
         const response = await getRecommendations(
           request.description,
-          appStore.getExtractedThemes()
+          appStore.getExtractedThemes(),
+          { signal: controller.signal }
         );
+        if (!isCurrentRequest) return;
 
         const convertedDatasets = response.recommendations.map((apiDataset) =>
           convertApiDatasetToReactDataset(apiDataset)
         );
+        const withBackendRecommendations = filterByActiveSources(convertedDatasets);
+        const prioritizedDatasets = sortDatasetsByCompatibility(withBackendRecommendations);
 
-        const selectedThemes = appStore.getExtractedThemes();
-        const withThemeEssentials = applySelectedThemeEssentials(
-          filterByActiveSources(convertedDatasets),
-          selectedThemes
-        );
-
-        const visibleIds = new Set(withThemeEssentials.map((d) => d.id));
-        const persistedSelection = appStore
-          .getSelectedDatasets()
-          .filter((dataset) => visibleIds.has(dataset.id))
-          .map((dataset) => dataset.id);
-        const essentialDatasets = withThemeEssentials.filter((d) => d.essential);
-        const nextSelectedIds = new Set([
-          ...persistedSelection,
-          ...essentialDatasets.map((dataset) => dataset.id),
-        ]);
-        const prioritizedDatasets = prioritizeSelectedEssentials(
-          withThemeEssentials,
-          nextSelectedIds
-        );
-
-        setDatasets(prioritizedDatasets);
-        setFilteredDatasets(prioritizedDatasets);
-
-        appStore.clearSelectedDatasets();
-        prioritizedDatasets.forEach((dataset) => {
-          appStore.setDatasetSelected(dataset, nextSelectedIds.has(dataset.id));
-        });
-        setSelectedDatasets(nextSelectedIds);
+        appStore.setRecommendationCache(cacheKey, prioritizedDatasets);
+        applyRecommendationDatasets(withBackendRecommendations);
       } catch (err) {
+        if (
+          !isCurrentRequest ||
+          (err instanceof DOMException && err.name === "AbortError")
+        ) {
+          return;
+        }
         const message =
           err instanceof Error ? err.message : "Failed to load datasets";
         setError(message);
         console.error("Error loading datasets:", err);
       } finally {
-        setIsLoading(false);
+        if (isCurrentRequest) {
+          setIsLoading(false);
+        }
       }
     };
 
     loadDatasets();
+    return () => {
+      isCurrentRequest = false;
+      controller.abort();
+    };
   }, [navigate]);
 
   useEffect(() => {
@@ -259,28 +248,24 @@ export function DatasetResults() {
     if (searchTerm) {
       const normalizedSearch = searchTerm.toLowerCase();
       filtered = filtered.filter(
-        (d: Dataset) =>
-          d.name.toLowerCase().includes(normalizedSearch) ||
-          d.provider.toLowerCase().includes(normalizedSearch) ||
-          d.category.toLowerCase().includes(normalizedSearch) ||
-          (d.source || "").toLowerCase().includes(normalizedSearch)
+        (d: Dataset) => getDatasetSearchText(d).includes(normalizedSearch)
       );
     }
 
-    if (filterAccess !== "all") {
-      filtered = filtered.filter((d: Dataset) => d.accessType === filterAccess);
-    }
-
     if (filterCategory !== "all") {
-      filtered = filtered.filter((d: Dataset) => d.category === filterCategory);
+      filtered = filtered.filter((d: Dataset) => getDatasetCategoryLabels(d).includes(filterCategory));
     }
 
-    setFilteredDatasets(filtered);
-  }, [searchTerm, filterAccess, filterCategory, datasets]);
+    if (filterSource !== "all") {
+      filtered = filtered.filter((d: Dataset) => (d.source || "unknown") === filterSource);
+    }
+
+    setFilteredDatasets(sortDatasetsByCompatibility(filtered));
+  }, [searchTerm, filterCategory, filterSource, datasets]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, filterAccess, filterCategory, datasets.length]);
+  }, [searchTerm, filterCategory, filterSource, datasets.length]);
 
   const totalPages = Math.max(1, Math.ceil(filteredDatasets.length / pageSize));
   const safeCurrentPage = Math.min(currentPage, totalPages);
@@ -298,21 +283,46 @@ export function DatasetResults() {
     appStore.setDatasetSelected(dataset, newSelected.has(dataset.id));
   };
 
-  const categories: string[] = Array.from(
-    new Set(datasets.map((d: Dataset) => d.category || "Uncategorized"))
-  ).sort((a, b) => a.localeCompare(b));
-  const missingEssential = datasets.filter(
+  const datasetCategoryLabels = Array.from(
+    new Set(datasets.flatMap((d: Dataset) => getDatasetCategoryLabels(d)))
+  );
+  const catalogCategoryLabels = getCatalogMainCategoryLabels();
+  const extraCategoryLabels = datasetCategoryLabels
+    .filter((category) => !catalogCategoryLabels.includes(category))
+    .sort((a, b) => a.localeCompare(b));
+  const categories: string[] = [...catalogCategoryLabels, ...extraCategoryLabels];
+  const categoryAvailabilityPool = datasets.filter((dataset) => {
+    const matchesSource = filterSource === "all" || (dataset.source || "unknown") === filterSource;
+    const matchesSearch = !searchTerm || getDatasetSearchText(dataset).includes(searchTerm.toLowerCase());
+    return matchesSource && matchesSearch;
+  });
+  const categoryCounts = categoryAvailabilityPool.reduce<Record<string, number>>((counts, dataset) => {
+    getDatasetCategoryLabels(dataset).forEach((category) => {
+      counts[category] = (counts[category] || 0) + 1;
+    });
+    return counts;
+  }, {});
+  const sources: string[] = Array.from(
+    new Set(datasets.map((d: Dataset) => d.source || "unknown"))
+  ).sort((a, b) => formatSourceLabel(a).localeCompare(formatSourceLabel(b)));
+  const missingRecommended = datasets.filter(
     (d: Dataset) => d.essential && !selectedDatasets.has(d.id)
   );
 
   const handleContinue = () => {
-    if (missingEssential.length > 0) {
+    if (missingRecommended.length > 0) {
       const confirmed = window.confirm(
-        `You haven't selected ${missingEssential.length} essential dataset(s). Are you sure you want to continue?`
+        `You have not selected ${missingRecommended.length} recommended dataset(s). Continue to fit review anyway?`
       );
       if (!confirmed) return;
     }
     navigate("/dataset-fit");
+  };
+
+  const resetFilters = () => {
+    setSearchTerm("");
+    setFilterCategory("all");
+    setFilterSource("all");
   };
 
   const goToPage = (page: number) => {
@@ -372,7 +382,7 @@ export function DatasetResults() {
                 <h2 className="font-medium text-red-900">Error Loading Datasets</h2>
                 <p className="text-red-700 text-sm mt-1">{error}</p>
                 <p className="text-red-800 text-xs mt-2">
-                  Make sure the backend API is running on port 8000. Run: cd backend && ../.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8000
+                  Make sure the configured backend API is running, then try again.
                 </p>
               </div>
             </div>
@@ -388,14 +398,20 @@ export function DatasetResults() {
   return (
     <div className="min-h-screen bg-neutral-50">
       <div className="max-w-6xl mx-auto p-6 space-y-6">
-        {/* Page header and recommendation context */}
+        {/* Page header */}
         <div className="bg-white rounded-lg shadow-sm border border-neutral-200 p-6">
-          <div>
-            <h1 className="text-2xl mb-2">Available Datasets for Madrid</h1>
-            <p className="text-neutral-600">
-              Review and select datasets that match your indicator requirements. Essential datasets for your selected themes are pre-selected and shown first.
-            </p>
-          </div>
+          <h1 className="text-2xl mb-2">Available Datasets for Madrid</h1>
+          <p className="text-neutral-600 max-w-3xl">
+            Review datasets sorted by semantic compatibility with your planning question. Recommended datasets are pre-selected only after the backend evidence gate passes.
+          </p>
+          {indicatorRequest?.description && (
+            <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-4">
+              <p className="text-xs uppercase tracking-wide text-neutral-500 mb-1">
+                Planning question
+              </p>
+              <p className="text-neutral-800">{indicatorRequest.description}</p>
+            </div>
+          )}
         </div>
 
         {/* Local search, filters, and view switcher */}
@@ -418,14 +434,14 @@ export function DatasetResults() {
               />
             </div>
             <select
-              value={filterAccess}
-              onChange={(e) => setFilterAccess(e.target.value)}
+              value={filterSource}
+              onChange={(e) => setFilterSource(e.target.value)}
               className="px-3 py-2 border border-neutral-200 rounded-md text-sm"
             >
-              <option value="all">All Access Types</option>
-              <option value="open">Open Access</option>
-              <option value="restricted">Restricted</option>
-              <option value="request">Request Needed</option>
+              <option value="all">All Sources</option>
+              {sources.map((source) => (
+                <option key={source} value={source}>{formatSourceLabel(source)}</option>
+              ))}
             </select>
             <select
               value={filterCategory}
@@ -434,28 +450,34 @@ export function DatasetResults() {
             >
               <option value="all">All Categories</option>
               {categories.map((category) => (
-                <option key={category} value={category}>{category}</option>
+                <option key={category} value={category} disabled={!categoryCounts[category]}>
+                  {categoryCounts[category] ? category : `${category} (no matches)`}
+                </option>
               ))}
             </select>
           </div>
-          <div className="mt-3 flex items-center gap-2 text-sm text-neutral-600">
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-neutral-600">
             <span>Showing {filteredDatasets.length} of {datasets.length} datasets</span>
             <span>•</span>
             <span>{selectedDatasets.size} selected</span>
+            <span>•</span>
+            <button type="button" className="text-blue-700 hover:underline" onClick={resetFilters}>
+              Reset filters
+            </button>
           </div>
         </div>
 
         {/* Selection quality warning before continuing to fit review */}
-        {missingEssential.length > 0 && (
+        {missingRecommended.length > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm">
               <p className="text-amber-900 font-medium mb-1">
-                Warning: Missing Essential Datasets
+                Some Recommended Datasets Are Not Selected
               </p>
               <p className="text-amber-800">
-                You have not selected {missingEssential.length} essential dataset(s).
-                This may limit the accuracy of your indicator.
+                You have not selected {missingRecommended.length} recommended dataset(s).
+                This may leave useful evidence out of the fit review.
               </p>
             </div>
           </div>
@@ -475,6 +497,9 @@ export function DatasetResults() {
             <p className="text-neutral-500 text-sm mt-2">
               Try broadening search, choosing another category, or activating an imported source.
             </p>
+            <Button type="button" variant="outline" className="mt-4" onClick={resetFilters}>
+              Reset filters
+            </Button>
           </div>
         )}
 
@@ -508,7 +533,8 @@ export function DatasetResults() {
         )}
 
         {/* Step navigation */}
-        <div className="flex gap-3">
+        <div className="sticky bottom-0 z-20 -mx-6 border-t border-neutral-200 bg-neutral-50/95 p-4 backdrop-blur">
+          <div className="flex gap-3">
           <Button
             onClick={() => navigate("/overview")}
             variant="outline"
@@ -525,6 +551,7 @@ export function DatasetResults() {
             Continue to Fit Review
             <ArrowRight className="w-4 h-4" />
           </Button>
+          </div>
         </div>
 
         <div className="text-center text-sm text-neutral-500">
@@ -536,6 +563,7 @@ export function DatasetResults() {
       {detailDataset && (
         <DatasetDetailPanel
           dataset={detailDataset}
+          preferredThemeIds={appStore.getExtractedThemes()}
           onClose={() => setDetailDataset(null)}
         />
       )}
@@ -558,6 +586,8 @@ function DatasetResultsView({
   onToggle,
   onViewDetails,
 }: DatasetResultsViewProps) {
+  const preferredThemeIds = appStore.getExtractedThemes();
+
   if (viewMode === "table") {
     return (
       <div className="bg-white rounded-lg border border-neutral-200 overflow-hidden">
@@ -566,9 +596,21 @@ function DatasetResultsView({
             <TableRow>
               <TableHead className="w-12">Select</TableHead>
               <TableHead>Dataset</TableHead>
+              <TableHead>
+                <div className="flex items-center gap-1">
+                  Compatibility
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <HelpCircle className="w-3.5 h-3.5 text-neutral-400" />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Based on semantic similarity, focused evidence, geography, and time alignment with the planning question.
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+              </TableHead>
               <TableHead>Category</TableHead>
               <TableHead>Coverage</TableHead>
-              <TableHead>Quality</TableHead>
               <TableHead>Published</TableHead>
               <TableHead className="text-right">Details</TableHead>
             </TableRow>
@@ -596,6 +638,7 @@ function DatasetResultsView({
           key={dataset.id}
           dataset={dataset}
           isSelected={selectedDatasets.has(dataset.id)}
+          preferredThemeIds={preferredThemeIds}
           onToggle={onToggle}
           onViewDetails={onViewDetails}
         />
@@ -654,8 +697,12 @@ function DatasetTableRow({
   onToggle: (dataset: Dataset) => void;
   onViewDetails: (dataset: Dataset) => void;
 }) {
+  const categoryLabels = getDatasetSubcategoryLabels(dataset);
+  const compatibilityScore = getDatasetCompatibilityScore(dataset);
+  const compatibilityReason = formatCompatibilityTooltip(dataset);
+
   return (
-    <TableRow data-state={isSelected ? "selected" : undefined}>
+    <TableRow aria-selected={isSelected}>
       <TableCell>
         <button
           onClick={() => onToggle(dataset)}
@@ -669,23 +716,36 @@ function DatasetTableRow({
         </button>
       </TableCell>
       <TableCell className="min-w-80 whitespace-normal">
-        <div className="flex flex-wrap gap-2 mb-1">
-          {dataset.essential && <Badge className="bg-blue-600">Essential</Badge>}
-        </div>
+        {dataset.essential && (
+          <div className="mb-1 flex flex-wrap gap-1.5">
+            <Badge className="bg-blue-600">Recommended</Badge>
+          </div>
+        )}
         <p className="font-medium leading-snug">{dataset.name}</p>
         <p className="text-xs text-neutral-500">{dataset.provider}</p>
       </TableCell>
+      <TableCell>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className={`inline-flex text-sm font-semibold ${datasetCompatibilityScoreClass(dataset)}`}>
+              {formatDatasetCompatibilityScore(compatibilityScore)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>{compatibilityReason}</TooltipContent>
+        </Tooltip>
+      </TableCell>
       <TableCell className="whitespace-normal">
-        <Badge variant="secondary">{dataset.category || "Uncategorized"}</Badge>
+        <div className="flex flex-wrap gap-1.5">
+          {categoryLabels.map((label) => (
+            <Badge key={label} variant="secondary">
+              {label}
+            </Badge>
+          ))}
+        </div>
       </TableCell>
       <TableCell className="whitespace-normal">
         <p className="font-medium">{dataset.spatialCoverage}</p>
         <p className="text-xs text-neutral-500">{dataset.spatialResolution}</p>
-      </TableCell>
-      <TableCell>
-        <p className={`font-medium ${getCompletenessColorClass(dataset.quality.completeness)}`}>
-          {dataset.quality.completeness}%
-        </p>
       </TableCell>
       <TableCell>
         <p className="text-sm text-neutral-600">{extractYearFromDate(dataset.publicationDate)}</p>
@@ -705,8 +765,34 @@ function DatasetTableRow({
   );
 }
 
-function formatAccessLabel(accessType: Dataset["accessType"]): string {
-  if (accessType === "open") return "Open";
-  if (accessType === "restricted") return "Restricted";
-  return "Request";
+function getDatasetCategoryLabels(dataset: Dataset): string[] {
+  return [categoryDisplayForDataset(dataset).primary.label];
+}
+
+function getDatasetSubcategoryLabels(dataset: Dataset): string[] {
+  const categoryDisplay = categoryDisplayForDataset(dataset);
+  const themeLabels = categoryDisplay.secondaryThemeIds.map(formatThemeName);
+  const fallbackLabel = dataset.category || categoryDisplay.primary.label;
+  return Array.from(new Set(themeLabels.length > 0 ? themeLabels : [fallbackLabel])).slice(0, 1);
+}
+
+function getDatasetSearchText(dataset: Dataset): string {
+  const categoryDisplay = categoryDisplayForDataset(dataset);
+  return [
+    dataset.name,
+    dataset.provider,
+    dataset.category,
+    dataset.source || "",
+    categoryDisplay.primary.label,
+    ...categoryDisplay.secondaryThemeIds.map(formatThemeName),
+  ].join(" ").toLowerCase();
+}
+
+function formatSourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    madrid_ckan: "Madrid CKAN",
+    datos_gob_es: "datos.gob.es",
+    unknown: "Unknown source",
+  };
+  return labels[source] || source;
 }

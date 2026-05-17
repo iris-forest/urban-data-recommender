@@ -14,9 +14,16 @@ from ..api_schemas import (
     DatasetFitAnalysisResponse,
     DatasetFitColumnInsight,
     DatasetFitInsight,
+    EdaCheckItem,
+    EdaFit,
+    EdaInterpretation,
+    EdaProfile,
+    PreviewSample,
 )
+from ..preview_quality import build_column_profiles, build_eda_profile
 from ..catalog_translation import ensure_dataset_translations
 from ..catalog import get_dataset_by_id
+from ..config import Config
 from ..llm_insights import _generate_with_llm, is_llm_enabled
 from ..models import Dataset, DatasetQuality
 from ..preview import NO_ROW_PREVIEW_MESSAGE, build_dataset_preview
@@ -501,8 +508,14 @@ def _build_dataset_evidence(dataset: Dataset, preview_rows: int) -> DatasetEvide
     """Collect preview rows, schema fields, and metadata-derived role hints."""
     ensure_dataset_translations(dataset)
     warnings: List[str] = []
+    allow_fetch = Config.FIT_ANALYSIS_ALLOW_FETCH
     try:
-        preview = build_dataset_preview(dataset, max_rows=preview_rows)
+        preview = build_dataset_preview(
+            dataset,
+            max_rows=preview_rows,
+            allow_fetch=allow_fetch,
+            use_cache=True,
+        )
     except Exception as exc:  # pragma: no cover - external preview failures are defensive
         logger.info("Dataset fit preview failed for %s: %s", dataset.dataset_id, exc)
         preview = {
@@ -513,19 +526,25 @@ def _build_dataset_evidence(dataset: Dataset, preview_rows: int) -> DatasetEvide
             "resource_name": "",
             "resource_format": "",
             "message": NO_ROW_PREVIEW_MESSAGE,
+            "preview_source": "none",
         }
         warnings.append(f"Preview failed for '{dataset.title_en or dataset.title}'; using catalog metadata only.")
-
-    if preview.get("message"):
-        warnings.append(f"'{dataset.title_en or dataset.title}' has limited row preview data.")
 
     rows = preview.get("rows") or []
     columns = preview.get("columns") or []
     if not columns and rows:
         columns = [{"name": name, "inferred_type": "unknown", "description": ""} for name in rows[0]]
 
+    column_profile_by_name = {
+        str(profile["name"]): profile
+        for profile in build_column_profiles(
+            rows,
+            columns=[str(column.get("name")) for column in columns if isinstance(column, dict) and column.get("name")],
+        )
+        if profile.get("name")
+    }
     column_insights = [
-        _classify_column(column, rows)
+        _classify_column(column, rows, column_profile_by_name.get(str(column.get("name", "")).strip()))
         for column in columns
         if isinstance(column, dict) and str(column.get("name", "")).strip()
     ]
@@ -556,12 +575,26 @@ def _build_dataset_evidence(dataset: Dataset, preview_rows: int) -> DatasetEvide
     )
 
 
-def _classify_column(column: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> DatasetFitColumnInsight:
+def _classify_column(
+    column: Dict[str, Any],
+    rows: Sequence[Dict[str, Any]],
+    column_profile: Optional[Dict[str, Any]] = None,
+) -> DatasetFitColumnInsight:
     """Assign one semantic role to a column using its name, type, description, and samples."""
     name = str(column.get("name", "")).strip()
     inferred_type = str(column.get("inferred_type") or column.get("type") or "unknown")
+    if column_profile and column_profile.get("inferred_type") not in {None, "unknown"}:
+        profile_type = str(column_profile["inferred_type"])
+        if profile_type == "numeric":
+            inferred_type = inferred_type if inferred_type not in {"unknown", "text"} else "number"
+        elif profile_type == "date_like":
+            inferred_type = "date"
+        elif profile_type == "boolean":
+            inferred_type = "boolean"
     description = str(column.get("description") or "")
     sample_values = _sample_values_for_column(name, rows)
+    if column_profile and column_profile.get("sample_values"):
+        sample_values = [str(value) for value in column_profile["sample_values"][:3]] or sample_values
     detection_text = " ".join([name, description, " ".join(sample_values[:3]), inferred_type])
     role_scores = _detect_role_scores(detection_text)
 
@@ -576,6 +609,12 @@ def _classify_column(column: Dict[str, Any], rows: Sequence[Dict[str, Any]]) -> 
     if semantic_role == "unknown" and inferred_type in {"integer", "number"}:
         semantic_role = "measure"
         confidence = 0.45
+
+    if semantic_role == "time" and column_profile and column_profile.get("inferred_type") == "date_like":
+        confidence = max(confidence, 0.55)
+    if semantic_role in {"geography", "geometry"} and column_profile:
+        if any(str(value).isdigit() and len(str(value)) >= 4 for value in column_profile.get("sample_values", [])):
+            confidence = max(confidence, 0.5)
 
     notes = ROLE_LABELS.get(semantic_role, "")
     return DatasetFitColumnInsight(
@@ -621,7 +660,7 @@ def _build_heuristic_response(
         _build_dataset_fit_insight(item, required_roles, request)
         for item in evidence
     ]
-    insights.sort(key=lambda insight: insight.fit_score, reverse=True)
+    insights.sort(key=lambda insight: insight.quality_score, reverse=True)
 
     cross_summary = _build_cross_dataset_summary(
         request=request,
@@ -662,6 +701,35 @@ def _build_dataset_fit_insight(
     geo_fields = _column_names_for_roles(evidence.column_insights, {"geography", "geometry"})
     time_fields = _column_names_for_roles(evidence.column_insights, {"time"})
     join_keys = _column_names_for_roles(evidence.column_insights, {"geography", "identifier", "geometry"})[:5]
+    roles_found = sorted(roles.intersection(required_roles) or roles)
+    roles_missing = sorted(required_roles.difference(roles))
+    eda_profile = EdaProfile(**build_eda_profile(evidence.preview, preview_rows_requested=request.preview_rows))
+    eda_fit = EdaFit(
+        roles_found=roles_found,
+        roles_missing=roles_missing,
+        join_keys=join_keys,
+        time_fields=time_fields,
+        geo_fields=geo_fields,
+    )
+    quality_checks = _quality_checks(dataset, evidence, eda_profile)
+    readiness_band = _readiness_band(quality_checks, eda_profile)
+    # Headline score matches fit_score (same as final overview); checks/readiness stay in EDA UI.
+    quality_score = fit_score
+    quality_band = _band_from_fit_score(fit_score)
+    eda_interpretation = EdaInterpretation(
+        readiness_band=readiness_band,
+        quality_checks=quality_checks,
+        synthesis=_eda_synthesis(readiness_band, eda_profile, missing, quality_checks),
+    )
+    preview_rows = evidence.preview.get("rows") or []
+    preview_sample = None
+    if preview_rows:
+        preview_sample = PreviewSample(
+            columns=[column for column in (evidence.preview.get("columns") or []) if isinstance(column, dict)],
+            rows=[row for row in preview_rows if isinstance(row, dict)],
+            source_url=str(evidence.preview.get("source_url") or ""),
+            preview_source=str(evidence.preview.get("preview_source") or eda_profile.preview_source or "none"),
+        )
 
     return DatasetFitInsight(
         dataset_id=dataset.dataset_id,
@@ -670,6 +738,8 @@ def _build_dataset_fit_insight(
         formats=dataset.formats,
         source_url=dataset.api_url or str(evidence.preview.get("source_url") or ""),
         fit_score=fit_score,
+        quality_score=quality_score,
+        quality_band=quality_band,
         recommended_role=role,
         fit_summary=_fit_summary(roles, required_roles),
         useful_columns=useful_columns,
@@ -680,6 +750,10 @@ def _build_dataset_fit_insight(
         geo_fields=geo_fields,
         quality_risks=quality_risks,
         recommended_next_action=_next_action(role, join_keys, time_fields, request),
+        eda_profile=eda_profile,
+        eda_fit=eda_fit,
+        eda_interpretation=eda_interpretation,
+        preview_sample=preview_sample,
     )
 
 
@@ -866,6 +940,226 @@ def _quality_risks(dataset: Dataset, evidence: DatasetEvidence) -> List[str]:
     return risks[:4]
 
 
+def _quality_checks(
+    dataset: Dataset,
+    evidence: DatasetEvidence,
+    eda_profile: EdaProfile,
+) -> List[EdaCheckItem]:
+    checks: List[EdaCheckItem] = []
+    stats = eda_profile.preview_stats or {}
+    row_count = int(stats.get("row_count") or 0)
+    rows_with_missing = int(stats.get("rows_with_missing") or 0)
+
+    if eda_profile.metadata_only:
+        checks.append(
+            EdaCheckItem(
+                id="preview_availability",
+                status="caution",
+                message="Only catalog metadata was profiled; row-level checks were not run on a sample.",
+            )
+        )
+    elif row_count == 0:
+        checks.append(
+            EdaCheckItem(
+                id="preview_availability",
+                status="caution",
+                message="No preview rows were available for missingness or value checks.",
+            )
+        )
+    elif rows_with_missing:
+        column_missingness = stats.get("column_missingness") or {}
+        top_columns = sorted(
+            column_missingness.items(),
+            key=lambda item: item[1].get("missing_count", 0) if isinstance(item[1], dict) else 0,
+            reverse=True,
+        )[:3]
+        detail = ""
+        if top_columns:
+            detail = " Most affected: " + ", ".join(
+                f"`{name}` ({item.get('missing_count', 0)})"
+                for name, item in top_columns
+                if isinstance(item, dict)
+            ) + "."
+        checks.append(
+            EdaCheckItem(
+                id="preview_missingness",
+                status="caution",
+                message=(
+                    f"{rows_with_missing} of {row_count} preview row(s) contain missing or empty values.{detail}"
+                ),
+            )
+        )
+    else:
+        checks.append(
+            EdaCheckItem(
+                id="preview_missingness",
+                status="good",
+                message="No missing or empty values were detected in the preview sample.",
+            )
+        )
+
+    mostly_missing = stats.get("mostly_missing_columns") or []
+    if mostly_missing:
+        checks.append(
+            EdaCheckItem(
+                id="column_missingness",
+                status="caution",
+                message=(
+                    "Mostly missing in the preview sample: "
+                    + ", ".join(f"`{column}`" for column in mostly_missing[:4])
+                    + "."
+                ),
+            )
+        )
+
+    uniform_columns = stats.get("uniform_columns") or []
+    if uniform_columns:
+        checks.append(
+            EdaCheckItem(
+                id="uniform_values",
+                status="check",
+                message=(
+                    "Uniform values across the sample in: "
+                    + ", ".join(str(column) for column in uniform_columns[:4])
+                    + "."
+                ),
+            )
+        )
+
+    quality = dataset.quality
+    if quality:
+        if _normalize_quality_value(quality.documentation) < 0.55:
+            checks.append(
+                EdaCheckItem(
+                    id="metadata_documentation",
+                    status="check",
+                    message="Catalog documentation is limited; confirm field definitions with the source.",
+                )
+            )
+        if _normalize_quality_value(quality.timeliness) < 0.55:
+            checks.append(
+                EdaCheckItem(
+                    id="metadata_timeliness",
+                    status="check",
+                    message="Catalog timeliness is uncertain for the requested analysis period.",
+                )
+            )
+    elif not checks:
+        checks.append(
+            EdaCheckItem(
+                id="metadata_quality",
+                status="unknown",
+                message="No formal metadata quality scores were available for this dataset.",
+            )
+        )
+
+    if not evidence.column_insights:
+        checks.append(
+            EdaCheckItem(
+                id="schema_visibility",
+                status="check",
+                message="Schema fields were not available for column-level inspection.",
+            )
+        )
+
+    return checks[:8]
+
+
+def _readiness_band(
+    quality_checks: Sequence[EdaCheckItem],
+    eda_profile: EdaProfile,
+) -> str:
+    statuses = [check.status for check in quality_checks]
+    stats = eda_profile.preview_stats or {}
+    mostly_missing = stats.get("mostly_missing_columns") or []
+
+    if any(status == "caution" for status in statuses) or mostly_missing:
+        if eda_profile.metadata_only or not eda_profile.rows_analyzed:
+            return "metadata_only_review"
+        return "usable_with_checks"
+    if any(status in {"check", "unknown"} for status in statuses):
+        return "usable_with_checks"
+    if eda_profile.rows_analyzed:
+        return "ready_for_exploration"
+    return "metadata_only_review"
+
+
+def _band_from_fit_score(fit_score: int) -> str:
+    if fit_score >= 75:
+        return "strong"
+    if fit_score >= 50:
+        return "usable"
+    return "limited"
+
+
+def _quality_score(
+    quality_checks: Sequence[EdaCheckItem],
+    readiness_band: str,
+    eda_profile: EdaProfile,
+) -> tuple[int, str]:
+    band_base = {
+        "ready_for_exploration": 82,
+        "usable_with_checks": 58,
+        "metadata_only_review": 32,
+    }
+    score = float(band_base.get(readiness_band, 45))
+
+    good_bonus = 0
+    for check in quality_checks:
+        if check.status == "good":
+            good_bonus += 4
+        elif check.status == "check":
+            score -= 6
+        elif check.status == "caution":
+            score -= 12
+        elif check.status == "unknown":
+            score -= 4
+    score += min(good_bonus, 20)
+
+    if eda_profile.metadata_only or not eda_profile.rows_analyzed:
+        score = min(score, 40.0)
+
+    score_int = int(max(0, min(100, round(score))))
+    if score_int >= 75:
+        band = "strong"
+    elif score_int >= 50:
+        band = "usable"
+    else:
+        band = "limited"
+    return score_int, band
+
+
+def _eda_synthesis(
+    readiness_band: str,
+    eda_profile: EdaProfile,
+    missing: Sequence[str],
+    quality_checks: Sequence[EdaCheckItem],
+) -> str:
+    parts: List[str] = []
+    if eda_profile.metadata_only:
+        parts.append("Profiling used catalog metadata only.")
+    elif eda_profile.rows_analyzed:
+        parts.append(
+            f"Profiled {eda_profile.rows_analyzed} preview row(s) across "
+            f"{eda_profile.columns_analyzed or 'available'} column(s)."
+        )
+    caution_messages = [
+        check.message for check in quality_checks if check.status == "caution"
+    ]
+    if caution_messages:
+        parts.append(caution_messages[0])
+    elif missing:
+        parts.append(missing[0])
+    band_labels = {
+        "ready_for_exploration": "Data readiness: promising sample for exploration after routine checks.",
+        "usable_with_checks": "Data readiness: usable with explicit checks before indicator calculation.",
+        "metadata_only_review": "Data readiness: metadata-only review; inspect source files before use.",
+        "unknown": "Data readiness: review sample scope before relying on this dataset.",
+    }
+    parts.append(band_labels.get(readiness_band, band_labels["unknown"]))
+    return " ".join(parts)
+
+
 def _next_action(
     role: str,
     join_keys: Sequence[str],
@@ -982,6 +1276,39 @@ def _recommended_ids_from_insights(insights: Sequence[DatasetFitInsight]) -> Lis
     return [insights[0].dataset_id] if insights else []
 
 
+def _merge_llm_insight_with_heuristic(
+    llm_insight: DatasetFitInsight,
+    heuristic_insight: DatasetFitInsight,
+) -> DatasetFitInsight:
+    """Preserve deterministic scores and EDA; let the LLM refine narrative fields only."""
+    return DatasetFitInsight(
+        dataset_id=heuristic_insight.dataset_id,
+        title=heuristic_insight.title or llm_insight.title,
+        provider=heuristic_insight.provider or llm_insight.provider,
+        formats=heuristic_insight.formats or llm_insight.formats,
+        source_url=heuristic_insight.source_url or llm_insight.source_url,
+        fit_score=heuristic_insight.fit_score,
+        quality_score=heuristic_insight.quality_score,
+        quality_band=heuristic_insight.quality_band,
+        recommended_role=llm_insight.recommended_role or heuristic_insight.recommended_role,
+        fit_summary=llm_insight.fit_summary or heuristic_insight.fit_summary,
+        useful_columns=heuristic_insight.useful_columns or llm_insight.useful_columns,
+        limitations=llm_insight.limitations or heuristic_insight.limitations,
+        missing_requirements=llm_insight.missing_requirements or heuristic_insight.missing_requirements,
+        join_keys=heuristic_insight.join_keys or llm_insight.join_keys,
+        time_fields=heuristic_insight.time_fields or llm_insight.time_fields,
+        geo_fields=heuristic_insight.geo_fields or llm_insight.geo_fields,
+        quality_risks=_dedupe([*heuristic_insight.quality_risks, *llm_insight.quality_risks]),
+        recommended_next_action=(
+            llm_insight.recommended_next_action or heuristic_insight.recommended_next_action
+        ),
+        eda_profile=heuristic_insight.eda_profile,
+        eda_fit=heuristic_insight.eda_fit,
+        eda_interpretation=heuristic_insight.eda_interpretation,
+        preview_sample=heuristic_insight.preview_sample,
+    )
+
+
 def _build_llm_response(
     request: DatasetFitAnalysisRequest,
     evidence: Sequence[DatasetEvidence],
@@ -1076,6 +1403,20 @@ When writing limitations, name the missing fields or themes directly instead of 
     response.recommended_dataset_ids = [dataset_id for dataset_id in response.recommended_dataset_ids if dataset_id in valid_ids]
     if not response.datasets:
         return None
+
+    heuristic_by_id = {item.dataset_id: item for item in heuristic_response.datasets}
+    merged_datasets: List[DatasetFitInsight] = []
+    for llm_item in response.datasets:
+        heuristic_item = heuristic_by_id.get(llm_item.dataset_id)
+        if heuristic_item is not None:
+            merged_datasets.append(_merge_llm_insight_with_heuristic(llm_item, heuristic_item))
+        else:
+            merged_datasets.append(llm_item)
+    response.datasets = sorted(merged_datasets, key=lambda item: item.quality_score, reverse=True)
+
+    if not (response.cross_dataset_summary.summary or "").strip():
+        response.cross_dataset_summary = heuristic_response.cross_dataset_summary
+
     return response
 
 

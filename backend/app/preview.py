@@ -10,6 +10,7 @@ from io import StringIO
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - covered by graceful fallback behavior
     requests = None
 
 from .models import Dataset
+from .preview_cache import get_cached_preview, preview_cache_key, set_cached_preview
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +31,36 @@ SUPPORTED_TABULAR_FORMATS = {"CSV", "TSV", "TXT"}
 SUPPORTED_JSON_FORMATS = {"JSON", "GEOJSON"}
 
 
-def build_dataset_preview(dataset: Dataset, max_rows: int = 5) -> Dict[str, Any]:
+def build_dataset_preview(
+    dataset: Dataset,
+    max_rows: int = 5,
+    *,
+    allow_fetch: bool = True,
+    use_cache: bool = True,
+) -> Dict[str, Any]:
     """Build schema and row preview payload for one dataset."""
     row_limit = max(1, min(max_rows, MAX_PREVIEW_ROWS))
+    cache_key = preview_cache_key(dataset.dataset_id, row_limit)
+    if use_cache:
+        cached = get_cached_preview(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+    started = time.monotonic()
     schema_fields = _normalize_schema_fields(getattr(dataset, "schema_fields", []))
     selected_resource = _select_preview_resource(getattr(dataset, "preview_resources", []))
     source_url = (selected_resource or {}).get("url") or dataset.api_url
-    rows = _normalize_rows(getattr(dataset, "sample_preview", []))[:row_limit]
+    catalog_rows = _normalize_rows(getattr(dataset, "sample_preview", []))[:row_limit]
+    rows = list(catalog_rows)
     fetch_error = ""
+    preview_source = "catalog_sample" if rows else "none"
 
-    if not rows and selected_resource:
+    if allow_fetch and not rows and selected_resource:
         try:
-            rows = _fetch_resource_rows(selected_resource, row_limit)
+            fetched = _fetch_resource_rows(selected_resource, row_limit)
+            if fetched:
+                rows = fetched
+                preview_source = "fetched_resource"
         except Exception as exc:  # pragma: no cover - defensive around flaky external APIs
             fetch_error = str(exc)
             logger.info(
@@ -57,7 +77,17 @@ def build_dataset_preview(dataset: Dataset, max_rows: int = 5) -> Dict[str, Any]
     if fetch_error and not rows:
         logger.debug("Preview fallback for %s after fetch error: %s", dataset.dataset_id, fetch_error)
 
-    return {
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if elapsed_ms > 500:
+        logger.info(
+            "Preview built for %s in %sms (source=%s, rows=%s)",
+            dataset.dataset_id,
+            elapsed_ms,
+            preview_source,
+            len(rows),
+        )
+
+    payload = {
         "dataset_id": dataset.dataset_id,
         "columns": columns,
         "rows": rows[:row_limit],
@@ -65,7 +95,11 @@ def build_dataset_preview(dataset: Dataset, max_rows: int = 5) -> Dict[str, Any]
         "resource_name": (selected_resource or {}).get("name", ""),
         "resource_format": (selected_resource or {}).get("format", ""),
         "message": message,
+        "preview_source": preview_source,
     }
+    if use_cache:
+        set_cached_preview(cache_key, payload)
+    return payload
 
 
 def _select_preview_resource(resources: Iterable[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

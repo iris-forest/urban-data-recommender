@@ -10,7 +10,16 @@ from .api_schemas import (
     RecommendResponse,
 )
 from .catalog_translation import ensure_dataset_translations
+from .dataset_metadata import (
+    dataset_resources,
+    infer_dataset_data_types,
+    infer_dataset_provenance,
+    infer_record_data_types,
+    infer_record_provenance,
+)
 from .models import Dataset, GraphState
+
+MAX_RECOMMENDATION_QUALITY_RISKS = 24
 
 
 def _has_preview_payload(value: Dict[str, Any]) -> bool:
@@ -66,6 +75,9 @@ def dataset_to_item(dataset: Dataset, is_essential: bool = False) -> DatasetItem
             or getattr(dataset, "preview_resources", [])
             or getattr(dataset, "sample_preview", [])
         ),
+        resources=dataset_resources(dataset),
+        provenance=infer_dataset_provenance(dataset),
+        data_types=infer_dataset_data_types(dataset),
     )
 
 
@@ -83,6 +95,7 @@ def recommendation_to_item(recommendation: Dict[str, Any]) -> DatasetItem:
         provider=recommendation.get("provider", ""),
         themes=recommendation.get("themes", []),
         matching_themes=recommendation.get("matching_themes", []),
+        focused_matching_themes=recommendation.get("focused_matching_themes", []),
         spatial_coverage=recommendation.get("spatial_coverage", ""),
         spatial_resolution=recommendation.get("spatial_resolution", ""),
         update_frequency=recommendation.get("update_frequency", ""),
@@ -96,6 +109,11 @@ def recommendation_to_item(recommendation: Dict[str, Any]) -> DatasetItem:
         description_en=description_en,
         reason_recommended=recommendation.get("reason_recommended"),
         relevance_score=recommendation.get("final_score"),
+        compatibility_score=recommendation.get("compatibility_score"),
+        compatibility_reason=recommendation.get("compatibility_reason"),
+        semantic_score=recommendation.get("semantic_score"),
+        compatibility_band=recommendation.get("compatibility_band"),
+        compatibility_evidence=recommendation.get("compatibility_evidence"),
         is_essential=bool(recommendation.get("is_essential", False)),
         source=recommendation.get("source"),
         api_url=recommendation.get("api_url"),
@@ -105,6 +123,13 @@ def recommendation_to_item(recommendation: Dict[str, Any]) -> DatasetItem:
         category_method=recommendation.get("category_method"),
         schema_fields=recommendation.get("schema_fields", []),
         preview_available=_has_preview_payload(recommendation),
+        resources=[
+            resource
+            for resource in recommendation.get("preview_resources", [])
+            if isinstance(resource, dict) and resource.get("url")
+        ],
+        provenance=recommendation.get("provenance") or infer_record_provenance(recommendation),
+        data_types=recommendation.get("data_types") or infer_record_data_types(recommendation),
     )
 
 
@@ -116,7 +141,11 @@ def recommendation_response_from_state(state: GraphState) -> RecommendResponse:
             for recommendation in state.get("scored_recommendations", [])
         ],
         data_gaps=state.get("gaps", []),
-        quality_risks=[{"risk": risk} for risk in state.get("risks", [])],
+        quality_risks=[
+            {"risk": risk}
+            for risk in state.get("risks", [])[:MAX_RECOMMENDATION_QUALITY_RISKS]
+        ],
+        debug_trace=state.get("debug_trace", []),
     )
 
 

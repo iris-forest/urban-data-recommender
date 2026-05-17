@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Optional, Sequence, cast
 from ..catalog import get_full_catalog, search_relevant_datasets
 from ..domain.gaps import identify_data_gaps
 from ..domain.indicator import parse_indicator_text, validate_indicator_text
-from ..domain.recommendations import candidate_from_dataset, score_candidate_recommendations
+from ..domain.recommendations import (
+    candidate_from_dataset,
+    score_candidate_recommendations,
+    semantic_reranker_backend_name,
+)
 from ..domain.risks import identify_quality_risks
 from ..domain.theme_extraction import extract_themes_with_confidence, fallback_theme_confidence
 from ..models import GraphState
@@ -97,7 +101,7 @@ def filter_candidates_state(state: GraphState) -> GraphState:
     catalog = search_relevant_datasets(
         indicator_text=indicator_text,
         extracted_themes=sorted(extracted),
-        limit=80,
+        limit=120,
         datos_pages=20,
     )
     candidates: List[Dict[str, Any]] = []
@@ -110,7 +114,7 @@ def filter_candidates_state(state: GraphState) -> GraphState:
 
     state["candidate_datasets"] = candidates
     _ensure_debug_trace(state).append(
-        f"filter_candidates_node: {len(state['candidate_datasets'])} candidates from query-time search"
+        f"stage1_broad_retrieval: {len(state['candidate_datasets'])} candidates from query-time search"
     )
     return state
 
@@ -126,10 +130,14 @@ def score_recommendations_state(state: GraphState) -> GraphState:
         candidates=candidates,
         theme_confidence=state.get("theme_confidence", {}),
         extracted_themes=state.get("extracted_themes", []),
+        indicator_text=state.get("indicator_text", ""),
     )
     state["scored_recommendations"] = scored
     _ensure_debug_trace(state).append(
-        f"score_recommendations_node: {len(scored)} scored, {sum(1 for item in scored if item['is_essential'])} essential"
+        "stage2_semantic_rerank: "
+        f"backend={semantic_reranker_backend_name()}, "
+        f"{len(scored)} scored, "
+        f"{sum(1 for item in scored if item['is_essential'])} recommended"
     )
     return state
 

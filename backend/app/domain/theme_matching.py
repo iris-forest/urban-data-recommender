@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any, Dict, List, Sequence
 
 from ..models import Dataset
@@ -45,24 +46,48 @@ def dataset_theme_blob(dataset: Dataset) -> str:
 
 def text_matches_theme(text: str, theme_id: str) -> bool:
     """Return whether text contains a glossary keyword for a theme."""
-    blob = _normalize_text(text)
-    for keyword in load_theme_glossary().get(theme_id, []):
-        normalized = _normalize_text(keyword)
-        if not normalized:
-            continue
-        if " " in normalized:
-            if normalized in blob:
-                return True
-        elif re.search(rf"\b{re.escape(normalized)}\b", blob):
-            return True
-    return False
+    return _normalized_blob_matches_theme(_normalize_text(text), theme_id)
 
 
 def infer_dataset_theme_overlap(dataset: Dataset, theme_ids: set[str]) -> set[str]:
     """Infer requested theme overlap from dataset text and metadata."""
+    if not theme_ids:
+        return set()
+
     blob = dataset_theme_blob(dataset)
+    token_set = set(re.findall(r"[\w.-]+", blob))
     return {
         theme_id
         for theme_id in theme_ids
-        if text_matches_theme(blob, theme_id)
+        if _normalized_blob_matches_theme(blob, theme_id, token_set=token_set)
     }
+
+
+@lru_cache(maxsize=None)
+def _normalized_theme_keywords(theme_id: str) -> tuple[str, ...]:
+    return tuple(
+        normalized
+        for keyword in load_theme_glossary().get(theme_id, [])
+        for normalized in [_normalize_text(keyword)]
+        if normalized
+    )
+
+
+def _normalized_blob_matches_theme(
+    blob: str,
+    theme_id: str,
+    token_set: set[str] | None = None,
+) -> bool:
+    for keyword in _normalized_theme_keywords(theme_id):
+        if " " in keyword:
+            if keyword in blob:
+                return True
+            continue
+
+        if token_set is None:
+            token_set = set(re.findall(r"[\w.-]+", blob))
+
+        if keyword in token_set:
+            return True
+
+    return False

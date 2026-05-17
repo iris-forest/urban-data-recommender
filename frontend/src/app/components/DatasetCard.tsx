@@ -1,6 +1,11 @@
 import { Card, CardContent } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "./ui/tooltip";
 import { 
   CheckCircle2, 
   Circle, 
@@ -13,11 +18,20 @@ import {
   Info
 } from "lucide-react";
 import { Dataset } from "../types";
-import { getCompletenessColorClass } from "../qualityDisplay";
+import {
+  compatibilityBadgeClass,
+  compatibilityBandLabel,
+  formatCompatibilityScore,
+  formatCompatibilityTooltip,
+  getDatasetCompatibilityScore,
+} from "../compatibilityDisplay";
+import { formatFileTypeLabels } from "../fileFormats";
+import { formatThemeName, getDatasetCategoryDisplay } from "../themeTaxonomy";
 
 interface DatasetCardProps {
   dataset: Dataset;
   isSelected: boolean;
+  preferredThemeIds?: string[];
   onToggle: (dataset: Dataset) => void;
   onViewDetails: (dataset: Dataset) => void;
 }
@@ -25,9 +39,13 @@ interface DatasetCardProps {
 export function DatasetCard({ 
   dataset, 
   isSelected, 
+  preferredThemeIds = [],
   onToggle, 
   onViewDetails 
 }: DatasetCardProps) {
+  const categoryDisplay = getDatasetCategoryDisplay(dataset, preferredThemeIds);
+  const compatibilityScore = getDatasetCompatibilityScore(dataset);
+
   const getAccessIcon = () => {
     switch (dataset.accessType) {
       case "open":
@@ -60,12 +78,30 @@ export function DatasetCard({
               <div className="flex flex-wrap items-center gap-2 mb-2">
                 {dataset.essential && (
                   <Badge variant="default" className="bg-blue-600">
-                    Essential
+                    Recommended
                   </Badge>
                 )}
+                <InfoBadge
+                  label={`${compatibilityBandLabel(dataset)} ${formatCompatibilityScore(compatibilityScore)}`}
+                  description={formatCompatibilityTooltip(dataset)}
+                  className={compatibilityBadgeClass(dataset)}
+                />
                 <Badge variant="secondary" className="text-xs">
-                  {dataset.category || "Uncategorized"}
+                  {categoryDisplay.primary.label}
                 </Badge>
+                {categoryDisplay.secondaryThemeIds.slice(0, 2).map((themeId) => (
+                  <Badge key={themeId} variant="outline" className="text-xs">
+                    {formatThemeName(themeId)}
+                  </Badge>
+                ))}
+                {categoryDisplay.secondaryThemeIds.length > 2 || categoryDisplay.overflowCount > 0 ? (
+                  <Badge variant="outline" className="text-xs">
+                    +{Math.max(0, categoryDisplay.secondaryThemeIds.length - 2) + categoryDisplay.overflowCount} secondary
+                  </Badge>
+                ) : null}
+                {dataset.dataTypes?.map((tag) => (
+                  <InfoBadge key={tag} label={tag} description="Data type inferred from metadata and file formats." variant="outline" />
+                ))}
               </div>
               <h3 className="font-semibold leading-snug mb-1">{dataset.name}</h3>
               <p className="text-sm text-neutral-500">{dataset.provider}</p>
@@ -115,26 +151,13 @@ export function DatasetCard({
             </div>
           </div>
 
-          {/* Quality indicators */}
-          <div className="bg-neutral-50 rounded p-3 border border-neutral-200">
-            <p className="text-xs text-neutral-500 mb-2">Quality Screening</p>
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Completeness</span>
-                <span className={`font-medium ${getCompletenessColorClass(dataset.quality.completeness)}`}>
-                  {dataset.quality.completeness}%
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Consistency</span>
-                <span className="font-medium capitalize">{dataset.quality.consistency}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-600">Documentation</span>
-                <span className="font-medium capitalize">{dataset.quality.documentation}</span>
-              </div>
+          {dataset.formats?.length ? (
+            <div className="flex flex-wrap gap-2">
+              {formatFileTypeLabels(dataset.formats).map((format) => (
+                <Badge key={format} variant="outline" className="text-xs">{format}</Badge>
+              ))}
             </div>
-          </div>
+          ) : null}
 
           {/* View details button */}
           <Button
@@ -149,5 +172,28 @@ export function DatasetCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function InfoBadge({
+  label,
+  description,
+  variant = "secondary",
+  className,
+}: {
+  label: string;
+  description: string;
+  variant?: "secondary" | "outline";
+  className?: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant={variant} className={`text-xs ${className || ""}`}>
+          {label}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>{description}</TooltipContent>
+    </Tooltip>
   );
 }

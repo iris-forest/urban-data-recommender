@@ -13,10 +13,12 @@ import {
   Home
 } from "lucide-react";
 import { appStore } from "../store";
-import { IndicatorRequest, Dataset, DatasetFitAnalysis } from "../types";
+import { IndicatorRequest, Dataset, DatasetFitAnalysis, DatasetNotes } from "../types";
 import { createDatasetPackage, createDatasetPackageManifest } from "../api";
+import { formatFileTypeLabels } from "../fileFormats";
 import { hasCompletenessRisk, hasFreshnessRisk } from "../qualityDisplay";
 import { formatGeographicLevel } from "../geographyDisplay";
+import { formatThemeName, getDatasetCategoryDisplay } from "../themeTaxonomy";
 
 const SUMMARY_LIST_LIMIT = 4;
 
@@ -25,6 +27,7 @@ export function FinalOverview() {
   const [request, setRequest] = useState<IndicatorRequest | null>(null);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [fitAnalysis, setFitAnalysis] = useState<DatasetFitAnalysis | null>(null);
+  const [datasetNotes, setDatasetNotes] = useState<DatasetNotes>({});
   const [showAllSelectedDatasets, setShowAllSelectedDatasets] = useState(false);
   const [showAllFitInsights, setShowAllFitInsights] = useState(false);
   const [downloading, setDownloading] = useState(false);
@@ -45,6 +48,7 @@ export function FinalOverview() {
     setRequest(indicatorRequest);
     setDatasets(selectedDatasets);
     setFitAnalysis(appStore.getDatasetFitAnalysis());
+    setDatasetNotes(appStore.getDatasetNotes());
   }, [navigate]);
 
   const handleStartNew = () => {
@@ -61,6 +65,7 @@ export function FinalOverview() {
     try {
       const manifest = await createDatasetPackageManifest({
         dataset_ids: datasets.map((dataset) => dataset.id),
+        dataset_notes: appStore.getDatasetNotes(),
       });
       const blob = new Blob([JSON.stringify(manifest, null, 2)], {
         type: "application/json",
@@ -68,11 +73,11 @@ export function FinalOverview() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "urban-planner-dataset-package-manifest.json";
+      a.download = "urban-planner-dataset-summary.json";
       a.click();
       URL.revokeObjectURL(url);
-      toast.success("Manifest exported", {
-        description: "The JSON matches the package manifest.",
+      toast.success("Summary exported", {
+        description: "The JSON includes selected datasets and your domain notes.",
       });
     } catch (err: any) {
       const errorMsg = err?.message || String(err);
@@ -93,7 +98,10 @@ export function FinalOverview() {
     setDownloadError(null);
     try {
       const datasetIds = datasets.map((d) => d.id);
-      const blob = await createDatasetPackage({ dataset_ids: datasetIds });
+      const blob = await createDatasetPackage({
+        dataset_ids: datasetIds,
+        dataset_notes: appStore.getDatasetNotes(),
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -141,7 +149,7 @@ export function FinalOverview() {
           "Verify spatial alignment between population and transport datasets",
           "Document any data preprocessing steps for reproducibility",
           "Consider temporal alignment when combining datasets from different update cycles",
-          "Validate indicator results against known reference neighborhoods",
+          "Validate results against known reference neighborhoods",
         ];
 
   return (
@@ -154,15 +162,15 @@ export function FinalOverview() {
             <h1 className="text-2xl">Dataset Selection Complete</h1>
           </div>
           <p className="text-neutral-600">
-            Review your indicator specification and selected datasets before proceeding
+            Review your planning question and selected datasets before proceeding
             with analysis.
           </p>
         </div>
 
-        {/* Original Indicator Request */}
+        {/* Original Planning Question */}
         <Card>
           <CardHeader>
-            <CardTitle>Your Indicator Request</CardTitle>
+            <CardTitle>Your Planning Question</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
@@ -204,8 +212,8 @@ export function FinalOverview() {
             {displayedEssentialDatasets.length > 0 && (
               <div>
                 <h3 className="text-sm font-semibold text-neutral-600 mb-2 flex items-center gap-2">
-                  <Badge className="bg-blue-600">Essential</Badge>
-                  <span>Required for Analysis</span>
+                  <Badge className="bg-blue-600">Recommended</Badge>
+                  <span>Recommended for Analysis</span>
                 </h3>
                 <div className="space-y-2">
                   {displayedEssentialDatasets.map(dataset => (
@@ -217,13 +225,14 @@ export function FinalOverview() {
                         <div>
                           <h4 className="font-medium">{dataset.name}</h4>
                           <p className="text-sm text-neutral-500">
-                            {dataset.provider} - {dataset.category || "Uncategorized"}
+                            {dataset.provider} - {formatDatasetCategorySummary(dataset)}
                           </p>
                         </div>
                         <Badge variant={dataset.accessType === "open" ? "default" : "secondary"}>
                           {formatAccessLabel(dataset.accessType)}
                         </Badge>
                       </div>
+                      <DatasetMetadataLine dataset={dataset} note={datasetNotes[dataset.id]} />
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
                         <div>
                           <span className="text-neutral-500">Source:</span>
@@ -272,7 +281,7 @@ export function FinalOverview() {
                         <div>
                           <h4 className="font-medium">{dataset.name}</h4>
                           <p className="text-sm text-neutral-500">
-                            {dataset.provider} - {dataset.category || "Uncategorized"}
+                            {dataset.provider} - {formatDatasetCategorySummary(dataset)}
                           </p>
                         </div>
                         <Badge variant="outline">Optional</Badge>
@@ -303,6 +312,7 @@ export function FinalOverview() {
                           </span>
                         </div>
                       </div>
+                      <DatasetMetadataLine dataset={dataset} note={datasetNotes[dataset.id]} />
                     </div>
                   ))}
                 </div>
@@ -332,7 +342,7 @@ export function FinalOverview() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <GitMerge className="w-5 h-5 text-blue-600" />
-                Dataset Fit Analysis
+                Dataset Fit Review
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -352,7 +362,8 @@ export function FinalOverview() {
                       <div>
                         <h4 className="font-medium leading-snug">{insight.title}</h4>
                         <p className="text-sm text-neutral-600">
-                          {insight.recommended_role}
+                          <span className="font-medium">Use this dataset as:</span>{" "}
+                          {formatRecommendedRoleUse(insight.recommended_role)}
                         </p>
                       </div>
                       <Badge className={fitBadgeClass(insight.fit_score)}>
@@ -428,7 +439,7 @@ export function FinalOverview() {
                 </p>
                 <p className="text-sm text-amber-800">
                   Some datasets have limited coverage, stale source data, or low consistency.
-                  This may affect the accuracy of your indicator. Consider validating
+                  This may affect the accuracy of your planning measure. Consider validating
                   results with additional sources or local knowledge.
                 </p>
               </div>
@@ -485,11 +496,11 @@ export function FinalOverview() {
               variant="outline"
               className="gap-2"
               disabled={exporting}
-              aria-label="Export package manifest as JSON"
+              aria-label="Export selected dataset summary as JSON"
               aria-busy={exporting}
             >
               <Download className="w-4 h-4" />
-              {exporting ? "Exporting…" : "Export Manifest"}
+              {exporting ? "Exporting…" : "Export Summary"}
             </Button>
             <Button
               onClick={handleDownloadPackage}
@@ -505,10 +516,10 @@ export function FinalOverview() {
             <Button
               onClick={handleStartNew}
               className="flex-1 gap-2"
-              aria-label="Start a new indicator request"
+              aria-label="Start a new planning question"
             >
               <Home className="w-4 h-4" />
-              Start New Indicator
+              Start New Planning Question
             </Button>
           </div>
         </div>
@@ -525,6 +536,37 @@ function fitBadgeClass(score: number): string {
   if (score >= 75) return "bg-green-600";
   if (score >= 50) return "bg-amber-600";
   return "bg-red-600";
+}
+
+function formatDatasetCategorySummary(dataset: Dataset): string {
+  const categoryDisplay = getDatasetCategoryDisplay(dataset);
+  const secondaryLabels = categoryDisplay.secondaryThemeIds.slice(0, 2).map(formatThemeName);
+  const overflowLabel = categoryDisplay.overflowCount > 0 ? `+${categoryDisplay.overflowCount} secondary` : "";
+
+  return [categoryDisplay.primary.label, ...secondaryLabels, overflowLabel]
+    .filter(Boolean)
+    .join(" - ");
+}
+
+function DatasetMetadataLine({ dataset, note }: { dataset: Dataset; note?: string }) {
+  return (
+    <div className="mb-2 space-y-2">
+      <div className="flex flex-wrap gap-2">
+        {dataset.provenance && <Badge variant="secondary">{dataset.provenance}</Badge>}
+        {(dataset.dataTypes || []).map((tag) => (
+          <Badge key={tag} variant="outline">{tag}</Badge>
+        ))}
+        {formatFileTypeLabels(dataset.formats || []).map((format) => (
+          <Badge key={format} variant="outline">{format}</Badge>
+        ))}
+      </div>
+      {note?.trim() ? (
+        <div className="rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-900">
+          <span className="font-medium">Domain note:</span> {note}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function formatAccessLabel(accessType: Dataset["accessType"]): string {
@@ -568,4 +610,34 @@ function escapeRegExp(value: string): string {
 
 function capitalizeFirst(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatRecommendedRoleUse(role: string): string {
+  const normalized = role.toLowerCase();
+  if (!role.trim()) return "a supporting dataset to inspect alongside the stronger matches.";
+  if (normalized.includes("not recommended")) return "not recommended for this planning question.";
+  if (normalized.includes("green space")) {
+    return "the green-space numerator, providing the park or green-area value you would measure.";
+  }
+  if (normalized.includes("denominator") || normalized.includes("population")) {
+    return "the resident-count denominator, so the measure can be calculated per resident.";
+  }
+  if (normalized.includes("environmental") || normalized.includes("air quality")) {
+    return "the LEZ or air-quality context layer, used to filter or compare the result.";
+  }
+  if (normalized.includes("geographic")) {
+    return "the join geography, helping align datasets to the same districts or boundaries.";
+  }
+  if (normalized.includes("access") || normalized.includes("mobility")) {
+    return "the access or mobility measure for travel, proximity, or network coverage.";
+  }
+  if (normalized.includes("heat") || normalized.includes("temperature")) {
+    return "the heat context layer for temperature or exposure comparisons.";
+  }
+  if (normalized.includes("land use")) return "land-use context for interpreting the pattern.";
+  if (normalized.includes("equity") || normalized.includes("socioeconomic")) {
+    return "equity or socioeconomic context for comparing who is affected.";
+  }
+  if (normalized.includes("water")) return "water-management context for the analysis.";
+  return role;
 }
