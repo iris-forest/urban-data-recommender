@@ -1065,12 +1065,42 @@ def score_title_description_compatibility(
     if focused_theme_hits:
         concept_score = min(1.0, 0.82 + (0.06 * (len(set(focused_theme_hits)) - 1)))
 
+    # Use the same temporal fallback as other logic
     temporal_component = temporal_score if temporal_score is not None else 0.5
+
+    # Legacy internal score (kept for compatibility with other ranking rules)
     score = (
         (0.45 * semantic_score)
         + (0.35 * concept_score)
         + (0.10 * text_score)
         + (0.10 * temporal_component)
+    )
+
+    # New compatibility breakdown signals and final weighted percentage
+    # Preset weights (semantically-weighted): semantic 40%, focused evidence 30%, text overlap 20%, timeframe 10%
+    COMPATIBILITY_WEIGHTS = {
+        "semantic": 0.40,
+        "focused_evidence": 0.30,
+        "text_overlap": 0.20,
+        "timeframe": 0.10,
+    }
+
+    # Prepare per-signal scores (0.0-1.0)
+    sig_semantic = round(max(0.0, min(1.0, float(semantic_score) if semantic_score is not None else 0.0)), 3)
+    sig_focused = round(max(0.0, min(1.0, float(concept_score) if concept_score is not None else 0.0)), 3)
+    sig_text = round(max(0.0, min(1.0, float(text_score) if text_score is not None else 0.0)), 3)
+    sig_time = round(max(0.0, min(1.0, float(temporal_component) if temporal_component is not None else 0.5)), 3)
+
+    weighted_components = {
+        "semantic": round(sig_semantic * COMPATIBILITY_WEIGHTS["semantic"], 3),
+        "focused_evidence": round(sig_focused * COMPATIBILITY_WEIGHTS["focused_evidence"], 3),
+        "text_overlap": round(sig_text * COMPATIBILITY_WEIGHTS["text_overlap"], 3),
+        "timeframe": round(sig_time * COMPATIBILITY_WEIGHTS["timeframe"], 3),
+    }
+
+    compatibility_final_score = round(
+        sum(weighted_components.values()),
+        3,
     )
     selected_theme_score = _selected_theme_fit_score(focused_theme_hits, text_score, temporal_score)
     if selected_theme_score is not None:
@@ -1102,6 +1132,7 @@ def score_title_description_compatibility(
     if geographic_reason:
         score = min(score, 0.49)
     rounded_score = round(max(0.0, min(1.0, score)), 3)
+    score_adjustment = round(rounded_score - compatibility_final_score, 3)
     band = _compatibility_band(rounded_score)
     evidence = _compatibility_evidence(
         focused_theme_hits,
@@ -1129,6 +1160,46 @@ def score_title_description_compatibility(
             semantic_score,
         ),
         "focused_theme_hits": focused_theme_hits,
+        "compatibility_breakdown": {
+            "weights": COMPATIBILITY_WEIGHTS,
+            "signals": [
+                {
+                    "id": "semantic",
+                    "label": "Semantic similarity",
+                    "score": sig_semantic,
+                    "percentage": int(round(sig_semantic * 100)),
+                    "weight": COMPATIBILITY_WEIGHTS["semantic"],
+                    "contribution": weighted_components["semantic"],
+                },
+                {
+                    "id": "focused_evidence",
+                    "label": "Focused evidence",
+                    "score": sig_focused,
+                    "percentage": int(round(sig_focused * 100)),
+                    "weight": COMPATIBILITY_WEIGHTS["focused_evidence"],
+                    "contribution": weighted_components["focused_evidence"],
+                },
+                {
+                    "id": "text_overlap",
+                    "label": "Text overlap",
+                    "score": sig_text,
+                    "percentage": int(round(sig_text * 100)),
+                    "weight": COMPATIBILITY_WEIGHTS["text_overlap"],
+                    "contribution": weighted_components["text_overlap"],
+                },
+                {
+                    "id": "timeframe",
+                    "label": "Timeframe fit",
+                    "score": sig_time,
+                    "percentage": int(round(sig_time * 100)),
+                    "weight": COMPATIBILITY_WEIGHTS["timeframe"],
+                    "contribution": weighted_components["timeframe"],
+                },
+            ],
+            "final_score": compatibility_final_score,
+            "final_percentage": round(compatibility_final_score * 100, 1),
+            "final_adjustment": score_adjustment,
+        },
     }
 
 
@@ -1343,6 +1414,7 @@ def score_candidate_recommendations(
                 "compatibility_score": compatibility["score"],
                 "compatibility_reason": compatibility["reason"],
                 "semantic_score": compatibility["semantic_score"],
+                "compatibility_breakdown": compatibility.get("compatibility_breakdown"),
                 "compatibility_band": compatibility["compatibility_band"],
                 "compatibility_evidence": compatibility["compatibility_evidence"],
                 "is_essential": is_essential,

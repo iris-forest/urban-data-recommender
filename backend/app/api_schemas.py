@@ -49,6 +49,23 @@ class CompatibilityEvidence(BaseModel):
     summary: str = ""
 
 
+class CompatibilitySignal(BaseModel):
+    id: str
+    label: str
+    score: float
+    percentage: int
+    weight: float
+    contribution: float
+
+
+class CompatibilityBreakdown(BaseModel):
+    weights: Dict[str, float] = Field(default_factory=dict)
+    signals: List[CompatibilitySignal] = Field(default_factory=list)
+    final_score: float = 0.0
+    final_percentage: float = 0.0
+    final_adjustment: float = 0.0
+
+
 class DatasetItem(BaseModel):
     """Simplified dataset for API responses."""
 
@@ -78,6 +95,7 @@ class DatasetItem(BaseModel):
     semantic_score: Optional[float] = None
     compatibility_band: Optional[Literal["strong", "partial", "weak"]] = None
     compatibility_evidence: Optional[CompatibilityEvidence] = None
+    compatibility_breakdown: Optional[CompatibilityBreakdown] = None
     is_essential: bool = False
     source: Optional[str] = None
     api_url: Optional[str] = None

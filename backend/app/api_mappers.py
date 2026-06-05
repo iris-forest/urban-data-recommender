@@ -114,6 +114,7 @@ def recommendation_to_item(recommendation: Dict[str, Any]) -> DatasetItem:
         semantic_score=recommendation.get("semantic_score"),
         compatibility_band=recommendation.get("compatibility_band"),
         compatibility_evidence=recommendation.get("compatibility_evidence"),
+        compatibility_breakdown=recommendation.get("compatibility_breakdown"),
         is_essential=bool(recommendation.get("is_essential", False)),
         source=recommendation.get("source"),
         api_url=recommendation.get("api_url"),

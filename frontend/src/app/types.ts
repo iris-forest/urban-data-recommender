@@ -31,6 +31,23 @@ export interface CompatibilityEvidence {
   summary: string;
 }
 
+export interface CompatibilitySignal {
+  id: string;
+  label: string;
+  score: number; // 0.0 - 1.0
+  percentage: number; // 0 - 100
+  weight: number; // 0.0 - 1.0
+  contribution: number; // 0.0 - 1.0 (score * weight)
+}
+
+export interface CompatibilityBreakdown {
+  weights: Record<string, number>;
+  signals: CompatibilitySignal[];
+  final_score: number; // 0.0 - 1.0
+  final_percentage: number; // 0 - 100
+  final_adjustment: number; // signed 0.0 - 1.0 residual to the final score
+}
+
 export interface Dataset {
   id: string;
   name: string;
@@ -66,6 +83,7 @@ export interface Dataset {
   semanticScore?: number;
   compatibilityBand?: CompatibilityBand;
   compatibilityEvidence?: CompatibilityEvidence;
+  compatibilityBreakdown?: CompatibilityBreakdown;
   quality: {
     completeness: number;
     timeliness: "recent" | "moderate" | "outdated";

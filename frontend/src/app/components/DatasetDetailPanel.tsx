@@ -23,6 +23,7 @@ import { getDatasetPreview, type DatasetPreviewResponse } from "../api";
 import {
   compatibilityBadgeClass,
   compatibilityBandLabel,
+  formatCompatibilityDelta,
   formatCompatibilityScore,
   formatCompatibilityTooltip,
   getDatasetCompatibilityScore,
@@ -91,6 +92,10 @@ export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }:
   const displayFormats = getDisplayFormats(dataset);
   const compatibilityScore = getDatasetCompatibilityScore(dataset);
   const compatibilityTooltip = formatCompatibilityTooltip(dataset);
+  const breakdown = dataset.compatibilityBreakdown;
+  const signalContributionTotal = breakdown?.signals.reduce((sum, signal) => sum + signal.contribution, 0) ?? 0;
+  const signalAdjustment = breakdown?.final_adjustment ?? 0;
+  const signalFinalScore = breakdown?.final_score ?? (compatibilityScore ?? 0);
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-6 z-50">
@@ -131,6 +136,36 @@ export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }:
                   </Badge>
                 )}
               </div>
+              {dataset.compatibilityBreakdown?.signals && (
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  {dataset.compatibilityBreakdown.signals.map((sig) => (
+                    <div
+                      key={sig.id}
+                      className="rounded border border-neutral-200 bg-white/40 p-3 flex flex-col items-start"
+                    >
+                      <div className="text-xs text-neutral-500">{sig.label}</div>
+                      <div className="flex items-baseline gap-2 mt-1">
+                        <div className="text-lg font-semibold text-neutral-900">{sig.percentage}%</div>
+                        <div className="text-xs text-neutral-500">({Math.round(sig.weight * 100)}% weight)</div>
+                      </div>
+                      <div className="w-full h-2 bg-neutral-100 rounded mt-2 overflow-hidden">
+                        <div
+                          className="h-2 bg-blue-600"
+                          style={{ width: `${Math.round(sig.contribution * 100)}%`, opacity: 0.9 }}
+                        />
+                      </div>
+                      <div className="text-xs text-neutral-500 mt-1">contributes {Math.round(sig.contribution * 100)}%</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {dataset.compatibilityBreakdown && (
+                <div className="flex flex-wrap items-center gap-4 rounded-md border border-dashed border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
+                  <span>Signals total: {formatCompatibilityScore(signalContributionTotal)}</span>
+                  <span>Adjustment: {formatCompatibilityDelta(signalAdjustment)}</span>
+                  <span className="font-medium text-neutral-800">Final score: {formatCompatibilityScore(signalFinalScore)}</span>
+                </div>
+              )}
               <div className="flex gap-3">
                 <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
                 <p className="text-neutral-800">{dataset.usageExplanation}</p>

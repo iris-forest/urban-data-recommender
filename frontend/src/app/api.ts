@@ -1034,6 +1034,7 @@ export function convertApiDatasetToReactDataset(
     semanticScore: apiDataset.semantic_score,
     compatibilityBand: apiDataset.compatibility_band,
     compatibilityEvidence: apiDataset.compatibility_evidence,
+    compatibilityBreakdown: (apiDataset as any).compatibility_breakdown,
     quality: {
       completeness,
       timeliness: normalizeTimeliness(apiDataset.quality.timeliness),

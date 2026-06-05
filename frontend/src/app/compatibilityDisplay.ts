@@ -21,6 +21,14 @@ export function formatCompatibilityScore(score: number | undefined): string {
   return `${Math.round(Math.max(0, Math.min(100, normalized)))}%`;
 }
 
+export function formatCompatibilityDelta(score: number | undefined): string {
+  if (typeof score !== "number") return "0%";
+  const normalized = score > 1 ? score : score * 100;
+  const rounded = Math.round(Math.abs(normalized));
+  const sign = score > 0 ? "+" : score < 0 ? "-" : "";
+  return `${sign}${rounded}%`;
+}
+
 export function compatibilityScoreClass(dataset: Dataset): string {
   if (typeof getDatasetCompatibilityScore(dataset) !== "number") return "text-neutral-500";
   const band = getDatasetCompatibilityBand(dataset);
