@@ -1,15 +1,18 @@
 {
-  "experimentalServices": {
-    "frontend": {
-      "root": "frontend",
-      "routePrefix": "/",
-      "framework": "vite"
+  "version": 2,
+  "builds": [
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": { "distDir": "dist" }
     },
-    "backend": {
-      "root": "backend",
-      "routePrefix": "/_/backend",
-      "runtime": "python3.11",
-      "entrypoint": "python -m uvicorn app.api:app --host 0.0.0.0 --port 8080"
+    {
+      "src": "backend/app/api.py",
+      "use": "@vercel/python"
     }
-  }
+  ],
+  "routes": [
+    { "src": "/_/backend/(.*)", "dest": "backend/app/api.py" },
+    { "src": "/(.*)", "dest": "frontend" }
+  ]
 }
