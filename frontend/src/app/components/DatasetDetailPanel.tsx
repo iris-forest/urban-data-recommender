@@ -5,7 +5,9 @@ import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import {
   AlertTriangle,
+  ChevronDown,
   CheckCircle2,
+  Circle,
   ExternalLink,
   FileText,
   HelpCircle,
@@ -21,11 +23,12 @@ import {
 import { Dataset } from "../types";
 import { getDatasetPreview, type DatasetPreviewResponse } from "../api";
 import {
-  compatibilityBadgeClass,
-  compatibilityBandLabel,
-  formatCompatibilityDelta,
+  DatasetCoverageStatus,
+  getDatasetCoverageSummary,
+} from "../datasetCoverage";
+import {
+  compatibilityScoreClass,
   formatCompatibilityScore,
-  formatCompatibilityTooltip,
   getDatasetCompatibilityScore,
 } from "../compatibilityDisplay";
 import { formatFileTypeLabel, formatFileTypeLabels } from "../fileFormats";
@@ -33,13 +36,61 @@ import { formatThemeName, getDatasetCategoryDisplay } from "../themeTaxonomy";
 
 const DESCRIPTION_PREVIEW_LENGTH = 360;
 
+type ScoreDriverStatus = DatasetCoverageStatus | "unknown";
+
 interface DatasetDetailPanelProps {
   dataset: Dataset;
   preferredThemeIds?: string[];
   onClose: () => void;
 }
 
+interface DatasetDetailContentProps {
+  dataset: Dataset;
+  preferredThemeIds?: string[];
+  onClose?: () => void;
+  showCloseButton?: boolean;
+}
+
 export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }: DatasetDetailPanelProps) {
+  const sourceLabel = formatSourceLabel(dataset.source || "unknown");
+
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+        <div className="sticky top-0 bg-white border-b border-neutral-200 p-6 flex justify-between items-start">
+          <div>
+            <h2 className="text-xl font-semibold leading-snug">{dataset.name}</h2>
+            <p className="mt-2 text-neutral-600">
+              {dataset.provider}
+              {dataset.source ? ` - ${sourceLabel}` : ""}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-neutral-100 rounded-lg transition-colors"
+            aria-label="Close dataset details"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <DatasetDetailContent
+          dataset={dataset}
+          preferredThemeIds={preferredThemeIds}
+          onClose={onClose}
+          showCloseButton
+        />
+      </div>
+    </div>
+  );
+}
+
+export function DatasetDetailContent({
+  dataset,
+  preferredThemeIds = [],
+  onClose,
+  showCloseButton = false,
+}: DatasetDetailContentProps) {
   const sourceLabel = formatSourceLabel(dataset.source || "unknown");
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [preview, setPreview] = useState<DatasetPreviewResponse | null>(null);
@@ -91,95 +142,73 @@ export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }:
   const resources = dataset.resources || [];
   const displayFormats = getDisplayFormats(dataset);
   const compatibilityScore = getDatasetCompatibilityScore(dataset);
-  const compatibilityTooltip = formatCompatibilityTooltip(dataset);
   const breakdown = dataset.compatibilityBreakdown;
-  const signalContributionTotal = breakdown?.signals.reduce((sum, signal) => sum + signal.contribution, 0) ?? 0;
-  const signalAdjustment = breakdown?.final_adjustment ?? 0;
-  const signalFinalScore = breakdown?.final_score ?? (compatibilityScore ?? 0);
+  const coverageSummary = getDatasetCoverageSummary(dataset, preferredThemeIds);
+  const scoreDrivers = getScoreDrivers(dataset, coverageSummary);
 
   return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-6 z-50">
-      <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-neutral-200 p-6 flex justify-between items-start">
-          <div>
-            <h2 className="text-xl font-semibold leading-snug">{dataset.name}</h2>
-            {dataset.essential && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <Badge className="bg-blue-600">Recommended</Badge>
-              </div>
-            )}
-            <p className="mt-2 text-neutral-600">
-              {dataset.provider}
-              {dataset.source ? ` - ${sourceLabel}` : ""}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-2 hover:bg-neutral-100 rounded-lg transition-colors"
-            aria-label="Close dataset details"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
         <div className="p-6 space-y-6">
           <div>
             <h3 className="font-semibold mb-2">Why This Dataset Matches</h3>
             <div className="rounded-lg border border-neutral-200 p-4 space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline" className={compatibilityBadgeClass(dataset)}>
-                  {compatibilityBandLabel(dataset)} {formatCompatibilityScore(compatibilityScore)}
-                </Badge>
-                {typeof dataset.semanticScore === "number" && (
-                  <Badge variant="secondary">
-                    Semantic {formatCompatibilityScore(dataset.semanticScore)}
-                  </Badge>
-                )}
+              <div className="flex flex-col gap-3 rounded-md bg-neutral-50 p-4 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Match</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className={`text-3xl font-semibold leading-none ${compatibilityScoreClass(dataset)}`}>
+                      {formatCompatibilityScore(compatibilityScore)}
+                    </span>
+                    <Badge variant="secondary">{coverageSummary.bestRoleLabel}</Badge>
+                  </div>
+                  <p className="mt-2 max-w-xl text-sm text-neutral-700">
+                    This score reflects how useful the dataset is as an input for the planning question, not whether it answers the full indicator alone.
+                  </p>
+                </div>
               </div>
-              {dataset.compatibilityBreakdown?.signals && (
-                <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-3">
-                  {dataset.compatibilityBreakdown.signals.map((sig) => (
-                    <div
-                      key={sig.id}
-                      className="rounded border border-neutral-200 bg-white/40 p-3 flex flex-col items-start"
-                    >
-                      <div className="text-xs text-neutral-500">{sig.label}</div>
-                      <div className="flex items-baseline gap-2 mt-1">
-                        <div className="text-lg font-semibold text-neutral-900">{sig.percentage}%</div>
-                        <div className="text-xs text-neutral-500">({Math.round(sig.weight * 100)}% weight)</div>
-                      </div>
-                      <div className="w-full h-2 bg-neutral-100 rounded mt-2 overflow-hidden">
-                        <div
-                          className="h-2 bg-blue-600"
-                          style={{ width: `${Math.round(sig.contribution * 100)}%`, opacity: 0.9 }}
-                        />
-                      </div>
-                      <div className="text-xs text-neutral-500 mt-1">contributes {Math.round(sig.contribution * 100)}%</div>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <CoverageList
+                  title="Covers"
+                  labels={[...coverageSummary.coveredLabels, ...coverageSummary.relatedLabels]}
+                  emptyLabel="No detected indicator role is directly covered."
+                  tone="covered"
+                />
+                <CoverageList
+                  title="Needs pairing"
+                  labels={coverageSummary.needsPairingLabels}
+                  emptyLabel="No detected pairing gaps."
+                  tone={coverageSummary.needsPairingLabels.length ? "missing" : "covered"}
+                />
+              </div>
+
+              <div className="space-y-2">
+                {scoreDrivers.map((driver) => (
+                  <ScoreDriverRow key={driver.label} {...driver} />
+                ))}
+              </div>
+
+              {breakdown?.signals?.length ? (
+                <details className="group rounded-md border border-neutral-200 bg-white">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2.5 text-sm font-medium text-neutral-800 [&::-webkit-details-marker]:hidden">
+                    Technical scoring details
+                    <ChevronDown className="h-4 w-4 shrink-0 text-neutral-400 transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="border-t border-neutral-200 px-3 py-3">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {breakdown.signals.map((signal) => (
+                        <div key={signal.id} className="rounded border border-neutral-200 bg-neutral-50 p-3 text-sm">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-medium text-neutral-800">{signal.label}</span>
+                            <span className="font-semibold text-neutral-900">{signal.percentage}%</span>
+                          </div>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            Weight {Math.round(signal.weight * 100)}%; influence {Math.round(signal.contribution * 100)}%.
+                          </p>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              )}
-              {dataset.compatibilityBreakdown && (
-                <div className="flex flex-wrap items-center gap-4 rounded-md border border-dashed border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
-                  <span>Signals total: {formatCompatibilityScore(signalContributionTotal)}</span>
-                  <span>Adjustment: {formatCompatibilityDelta(signalAdjustment)}</span>
-                  <span className="font-medium text-neutral-800">Final score: {formatCompatibilityScore(signalFinalScore)}</span>
-                </div>
-              )}
-              <div className="flex gap-3">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" />
-                <p className="text-neutral-800">{dataset.usageExplanation}</p>
-              </div>
-              <p className="text-sm text-neutral-700">{compatibilityTooltip}</p>
-              {dataset.compatibilityEvidence?.missing_concepts?.length ? (
-                <div className="flex flex-wrap gap-2 text-sm">
-                  <span className="text-neutral-500">Missing concepts:</span>
-                  {dataset.compatibilityEvidence.missing_concepts.map((concept) => (
-                    <Badge key={concept} variant="outline">
-                      {concept}
-                    </Badge>
-                  ))}
-                </div>
+                  </div>
+                </details>
               ) : null}
             </div>
           </div>
@@ -401,14 +430,14 @@ export function DatasetDetailPanel({ dataset, preferredThemeIds = [], onClose }:
             </div>
           </div>
 
-          <div className="pt-2">
-            <Button onClick={onClose} className="w-full">
-              Close
-            </Button>
-          </div>
+          {showCloseButton && onClose && (
+            <div className="pt-2">
+              <Button onClick={onClose} className="w-full">
+                Close
+              </Button>
+            </div>
+          )}
         </div>
-      </div>
-    </div>
   );
 }
 
@@ -428,6 +457,79 @@ function InfoBadge({
       </TooltipTrigger>
       <TooltipContent>{description}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function CoverageList({
+  title,
+  labels,
+  emptyLabel,
+  tone,
+}: {
+  title: string;
+  labels: string[];
+  emptyLabel: string;
+  tone: DatasetCoverageStatus;
+}) {
+  return (
+    <div className="rounded-md border border-neutral-200 bg-white p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">{title}</p>
+      {labels.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {labels.map((label) => (
+            <Badge key={label} variant="outline" className={coverageBadgeClass(tone)}>
+              {label}
+            </Badge>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-neutral-600">{emptyLabel}</p>
+      )}
+    </div>
+  );
+}
+
+function ScoreDriverRow({
+  label,
+  detail,
+  status,
+}: {
+  label: string;
+  detail: string;
+  status: ScoreDriverStatus;
+}) {
+  return (
+    <div className="flex gap-3 rounded-md border border-neutral-200 bg-white p-3">
+      {status === "covered" ? (
+        <CheckCircle2
+          className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600"
+          role="img"
+          aria-label="Supported"
+        />
+      ) : status === "related" ? (
+        <Circle
+          className="mt-0.5 h-4 w-4 shrink-0 text-sky-600"
+          role="img"
+          aria-label="Related"
+        />
+      ) : status === "unknown" ? (
+        <HelpCircle
+          className="mt-0.5 h-4 w-4 shrink-0 text-neutral-500"
+          role="img"
+          aria-label="Not mentioned"
+        />
+      ) : (
+        <AlertTriangle
+          className="mt-0.5 h-4 w-4 shrink-0 text-amber-600"
+          role="img"
+          aria-label="Needs attention"
+        />
+      )}
+      <div>
+        <p className="text-sm font-medium text-neutral-900">{label}</p>
+        <p className="text-sm text-neutral-600">{detail}</p>
+      </div>
+    </div>
   );
 }
 
@@ -490,6 +592,74 @@ function DatasetMetadataGrid({
       </div>
     </div>
   );
+}
+
+function getScoreDrivers(
+  dataset: Dataset,
+  coverageSummary: ReturnType<typeof getDatasetCoverageSummary>
+): Array<{ label: string; detail: string; status: ScoreDriverStatus }> {
+  const evidence = dataset.compatibilityEvidence;
+  const directLabels = coverageSummary.coveredLabels;
+  const relatedLabels = coverageSummary.relatedLabels;
+  const semanticScore = typeof dataset.semanticScore === "number"
+    ? formatCompatibilityScore(dataset.semanticScore)
+    : "not scored";
+  const geography = evidence?.geography || "No geography evidence was returned.";
+  const time = evidence?.time || "No clear time metadata was available for this dataset.";
+  const hasGeographyEvidence = Boolean(evidence?.geography);
+  const hasUnknownGeography =
+    !hasGeographyEvidence ||
+    /does not mention|not mentioned|not mention|not specified|not available|no .*evidence/i.test(geography);
+  const hasUnknownTime =
+    !Boolean(evidence?.time) ||
+    /no clear|does not mention|not mentioned|not mention|not specified|not available/i.test(time);
+  const hasNegativeGeography = /not compatible|outside|non-madrid/i.test(geography);
+
+  return [
+    {
+      label: "Direct role evidence",
+      detail: directLabels.length
+        ? `Directly covers ${formatList(directLabels)}.`
+        : "No required role is directly covered by focused evidence.",
+      status: directLabels.length ? "covered" : "unknown",
+    },
+    {
+      label: "Related text evidence",
+      detail: relatedLabels.length
+        ? `Related to ${formatList(relatedLabels)}; semantic similarity is ${semanticScore}.`
+        : `No related required role was found; semantic similarity is ${semanticScore}.`,
+      status: relatedLabels.length ? "related" : "unknown",
+    },
+    {
+      label: "Geography context",
+      detail: geography,
+      status: hasUnknownGeography ? "unknown" : hasNegativeGeography ? "missing" : "covered",
+    },
+    {
+      label: "Time context",
+      detail: time,
+      status: hasUnknownTime ? "unknown" : "covered",
+    },
+    {
+      label: "Missing required components",
+      detail: coverageSummary.needsPairingLabels.length
+        ? `Pair with datasets for ${formatList(coverageSummary.needsPairingLabels)}.`
+        : "No missing detected indicator components.",
+      status: coverageSummary.needsPairingLabels.length ? "missing" : "covered",
+    },
+  ];
+}
+
+function coverageBadgeClass(status: DatasetCoverageStatus): string {
+  if (status === "covered") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "related") return "border-sky-200 bg-sky-50 text-sky-800";
+  return "border-amber-200 bg-amber-50 text-amber-800";
+}
+
+function formatList(labels: string[]): string {
+  if (labels.length <= 1) return labels[0] || "";
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
 }
 
 function formatSourceLabel(source: string): string {

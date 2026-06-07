@@ -27,19 +27,6 @@ import {
   EdaCheckItem,
   IndicatorRequest,
 } from "../types";
-import {
-  compatibilityBandLabel,
-  formatCompatibilityScore,
-  getDatasetCompatibilityBand,
-  getDatasetCompatibilityScore,
-} from "../compatibilityDisplay";
-import {
-  formatQualityScore,
-  getInsightFitBand,
-  getInsightFitScore,
-  qualityBandLabel,
-  qualityScoreClass,
-} from "../qualityDisplay";
 import { formatThemeName } from "../themeTaxonomy";
 
 const FIT_REVIEW_LOADING_STATUSES = [
@@ -47,8 +34,8 @@ const FIT_REVIEW_LOADING_STATUSES = [
   "Fetching preview samples from sources when needed...",
   "Checking rows for missing or empty values...",
   "Assessing completeness and column coverage...",
-  "Scoring data quality for each dataset...",
-  "Preparing the fit review...",
+  "Identifying review steps for each dataset...",
+  "Preparing the quality review...",
 ];
 const LOADING_STATUS_ROTATION_MS = 3600;
 const FIT_REVIEW_PREVIEW_ROWS = 5;
@@ -168,9 +155,7 @@ export function DatasetFitReview() {
 
   const sortedInsights = useMemo(() => {
     const list = analysis?.datasets || [];
-    return [...list].sort(
-      (left, right) => getInsightFitScore(right) - getInsightFitScore(left)
-    );
+    return [...list].sort(compareQualityInsights);
   }, [analysis]);
   const loadingStatusIndex = loadingStatusStep % FIT_REVIEW_LOADING_STATUSES.length;
   const currentLoadingMessage = FIT_REVIEW_LOADING_STATUSES[loadingStatusIndex];
@@ -197,12 +182,11 @@ export function DatasetFitReview() {
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Sparkles className="w-6 h-6 text-blue-600" />
-              <h1 className="text-2xl">Dataset Fit Review</h1>
+              <h1 className="text-2xl">Data Quality Review</h1>
             </div>
             <p className="text-neutral-600 max-w-3xl">
-              Review verification across completeness, consistency, timeliness, resolution,
-              coverage, and trustworthiness. Match scores from the previous step are for context
-              only. See the note below on what this prototype analyzes.
+              Selected datasets already matched your question. This checks usability,
+              freshness, completeness, accessibility, and preview quality.
             </p>
             <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-4">
               <p className="text-xs uppercase tracking-wide text-neutral-500 mb-1">
@@ -248,7 +232,7 @@ export function DatasetFitReview() {
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex gap-3">
             <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
             <div>
-              <p className="font-medium text-red-900">Fit review failed</p>
+              <p className="font-medium text-red-900">Quality review failed</p>
               <p className="text-sm text-red-800 mt-1">{error}</p>
             </div>
           </div>
@@ -265,10 +249,6 @@ export function DatasetFitReview() {
                 <p className="text-sm text-neutral-700 mb-3">
                   {formatCrossDatasetSummary(analysis)}
                 </p>
-                <CrossDatasetSelectionSummary
-                  insights={sortedInsights}
-                  datasetsById={datasetsById}
-                />
                 <div className="space-y-2 mt-4">
                   {analysis.cross_dataset_summary.join_strategy.map((item) => (
                     <div key={item} className="flex gap-2 text-sm text-neutral-700">
@@ -282,12 +262,12 @@ export function DatasetFitReview() {
               <div className="bg-white rounded-lg border border-neutral-200 p-5">
                 <div className="flex items-center gap-2 mb-3">
                   <AlertTriangle className="w-5 h-5 text-amber-600" />
-                  <h2 className="font-semibold">Gaps and Workflow</h2>
+                  <h2 className="font-semibold">Gaps and Next Steps</h2>
                 </div>
                 <ListBlock items={analysis.cross_dataset_summary.gaps} tone="amber" />
                 <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-3">
                   <p className="text-xs uppercase tracking-wide text-neutral-500 mb-2">
-                    Recommended workflow
+                    Suggested workflow
                   </p>
                   <OrderedListBlock items={analysis.cross_dataset_summary.recommended_workflow} />
                 </div>
@@ -325,7 +305,7 @@ export function DatasetFitReview() {
               disabled={loading}
             >
               <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-              Re-run fit review
+              Re-run quality review
             </Button>
             <Button
               onClick={() => navigate("/summary")}
@@ -339,7 +319,7 @@ export function DatasetFitReview() {
         </div>
 
         <div className="text-center text-sm text-neutral-500">
-          Step 4 of 5: Fit review
+          Step 4 of 5: Data quality
         </div>
       </div>
     </div>
@@ -393,8 +373,6 @@ function DatasetQualityReviewCard({
   const datasetTitle = dataset?.name || insight.title;
   const edaInterpretation = insight.eda_interpretation;
   const qualityChecks = edaInterpretation?.quality_checks || [];
-  const fitScore = getInsightFitScore(insight);
-  const fitBand = getInsightFitBand(insight);
   const readinessBand = edaInterpretation?.readiness_band;
   const synthesis = edaInterpretation?.synthesis;
   const formats = dataset?.formats?.length ? dataset.formats : insight.formats;
@@ -403,16 +381,18 @@ function DatasetQualityReviewCard({
     <Card className="shadow-sm">
       <CardContent className="p-5 space-y-4">
         <div className="rounded-lg border border-neutral-200 bg-neutral-50/80 p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Fit score</p>
-          <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className={`text-3xl font-bold leading-none ${qualityScoreClass(fitBand)}`}>
-              {formatQualityScore(fitScore)}
-            </span>
-            <span className="text-sm font-semibold text-neutral-800">{qualityBandLabel(fitBand)}</span>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Review status</p>
+              <p className={`mt-1 text-2xl font-semibold leading-tight ${reviewStatusTextClass(readinessBand)}`}>
+                {formatQualityStatusLabel(readinessBand)}
+              </p>
+            </div>
+            <Badge variant="outline" className="border-neutral-200 bg-white px-2.5 py-1 text-sm text-neutral-700">
+              {formatReviewActionLabel(readinessBand)}
+            </Badge>
           </div>
-          {readinessBand && (
-            <p className="mt-2 text-sm text-neutral-600">{formatReadinessBandLabel(readinessBand)}</p>
-          )}
+          <p className="mt-2 text-sm text-neutral-600">{formatReadinessBandLabel(readinessBand)}</p>
         </div>
 
         <div>
@@ -429,17 +409,11 @@ function DatasetQualityReviewCard({
           ))}
         </div>
 
-        {insight.eda_profile && (
-          <p className="text-sm text-neutral-600">{formatSampleScopeDisclaimer(insight.eda_profile)}</p>
-        )}
-
         {synthesis && <p className="text-sm text-neutral-700 leading-relaxed">{synthesis}</p>}
 
-        <QualityCheckCards checks={qualityChecks} />
+        <ReviewSteps insight={insight} />
 
-        {formatMatchContextLine(dataset) && (
-          <p className="text-xs text-neutral-500">{formatMatchContextLine(dataset)}</p>
-        )}
+        <QualityCheckCards checks={qualityChecks} />
 
         <ImplementationDetailsSection insight={insight} edaFit={insight.eda_fit} />
 
@@ -449,27 +423,40 @@ function DatasetQualityReviewCard({
   );
 }
 
-function formatSampleScopeDisclaimer(profile: DatasetFitInsight["eda_profile"]): string {
-  if (!profile) return "Sample scope not reported.";
-  if (profile.metadata_only) {
-    return "Based on catalog metadata only — not actual row values.";
-  }
-  const rows = profile.rows_analyzed ?? 0;
-  const source = formatPreviewSource(profile.preview_source || "none");
-  return `Based on ${rows} row${rows === 1 ? "" : "s"} ${source} — not the full dataset.`;
+function compareQualityInsights(left: DatasetFitInsight, right: DatasetFitInsight): number {
+  const readinessDelta =
+    reviewPriority(right.eda_interpretation?.readiness_band) -
+    reviewPriority(left.eda_interpretation?.readiness_band);
+  if (readinessDelta !== 0) return readinessDelta;
+  return left.title.localeCompare(right.title);
 }
 
-function formatPreviewSource(source: string): string {
-  if (source === "catalog_sample") return "from catalog sample";
-  if (source === "fetched_resource") return "fetched from source file";
-  return "with no row sample";
+function reviewPriority(band?: string): number {
+  if (band === "metadata_only_review") return 3;
+  if (band === "usable_with_checks") return 2;
+  if (band === "ready_for_exploration") return 0;
+  return 0;
 }
 
-function formatMatchContextLine(dataset: Dataset | undefined): string | null {
-  if (dataset && getDatasetCompatibilityScore(dataset) != null) {
-    return `Match when selected: ${compatibilityBandLabel(dataset)} · ${formatCompatibilityScore(getDatasetCompatibilityScore(dataset)!)}`;
-  }
-  return null;
+function formatQualityStatusLabel(band?: string): string {
+  if (band === "ready_for_exploration") return "No major issues";
+  if (band === "usable_with_checks") return "Needs review";
+  if (band === "metadata_only_review") return "Source check needed";
+  return "Review needed";
+}
+
+function formatReviewActionLabel(band?: string): string {
+  if (band === "ready_for_exploration") return "Spot-check";
+  if (band === "usable_with_checks") return "Action needed";
+  if (band === "metadata_only_review") return "No row preview";
+  return "Review";
+}
+
+function reviewStatusTextClass(band?: string): string {
+  if (band === "ready_for_exploration") return "text-emerald-700";
+  if (band === "usable_with_checks") return "text-amber-700";
+  if (band === "metadata_only_review") return "text-red-700";
+  return "text-neutral-950";
 }
 
 function PrototypeAnalysisNotice({
@@ -485,7 +472,7 @@ function PrototypeAnalysisNotice({
       <p className="mt-2 text-sm text-amber-950/90 leading-relaxed">
         This prototype reviews each selected dataset using catalog metadata and up to{" "}
         <span className="font-medium">{previewRows}</span> sample rows only—not the full file.
-        Verification scores reflect what could be checked from that sample. Open the source
+        Review guidance reflects what could be checked from that sample. Open the source
         datasets to confirm values, coverage, and freshness before using them in a real indicator.
       </p>
       {operationalWarnings.length > 0 && (
@@ -518,13 +505,13 @@ function ImplementationDetailsSection({
     <FitDetailCollapsible title="Implementation details">
       {hasRole && (
         <p className="text-sm text-neutral-700">
-          <span className="font-medium text-neutral-800">Use as:</span>{" "}
+          <span className="font-medium text-neutral-800">Suggested analysis role:</span>{" "}
           {formatRecommendedRoleUse(insight.recommended_role)}
         </p>
       )}
       {insight.recommended_next_action && (
         <p className="text-sm text-neutral-600">
-          <span className="font-medium text-neutral-800">Next:</span> {insight.recommended_next_action}
+          <span className="font-medium text-neutral-800">Suggested next step:</span> {insight.recommended_next_action}
         </p>
       )}
       <FitIndicatorFieldMapping insight={insight} edaFit={edaFit} />
@@ -593,8 +580,8 @@ function FitIndicatorFieldMapping({
         </div>
       )}
       <div className="grid grid-cols-1 gap-3 text-sm md:grid-cols-2">
-        <FieldList label="Categories found" items={categoriesFound} />
-        <FieldList label="Categories missing" items={categoriesMissing} />
+        <FieldList label="Indicator roles found" items={categoriesFound} />
+        <FieldList label="Indicator roles missing" items={categoriesMissing} />
         <FieldList
           label="Join keys"
           items={joinKeys}
@@ -605,6 +592,93 @@ function FitIndicatorFieldMapping({
       </div>
     </FitDetailCollapsible>
   );
+}
+
+function ReviewSteps({ insight }: { insight: DatasetFitInsight }) {
+  const steps = buildReviewSteps(insight);
+  if (steps.length === 0) return null;
+
+  return (
+    <section className="rounded-lg border border-neutral-200 bg-white p-3">
+      <p className="mb-2 text-sm font-semibold text-neutral-900">What to do next</p>
+      <ol className="space-y-2 text-sm text-neutral-700">
+        {steps.map((step, index) => (
+          <li key={step} className="flex gap-3">
+            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-neutral-900 text-[11px] font-medium text-white">
+              {index + 1}
+            </span>
+            <span>{step}</span>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function buildReviewSteps(insight: DatasetFitInsight): string[] {
+  const steps: string[] = [];
+  const readinessBand = insight.eda_interpretation?.readiness_band;
+  const checks = insight.eda_interpretation?.quality_checks || [];
+
+  if (readinessBand === "metadata_only_review") {
+    steps.push("Open or download the source file and confirm it contains real rows before analysis.");
+  } else if (readinessBand === "usable_with_checks") {
+    steps.push("Review the flagged checks below and decide whether they affect your indicator.");
+  } else if (readinessBand === "ready_for_exploration") {
+    steps.push("Spot-check the source file and confirm the preview matches the real dataset.");
+  } else {
+    steps.push("Inspect the source file before using this dataset in analysis.");
+  }
+
+  for (const check of checks) {
+    if (check.status === "good") continue;
+    const step = reviewStepForCheck(check);
+    if (step) steps.push(step);
+  }
+
+  if (insight.join_keys.length === 0) {
+    steps.push("Identify a shared geography or join key before combining this dataset with others.");
+  }
+  if (insight.time_fields.length === 0) {
+    steps.push("Confirm whether a date or period field is needed for your analysis window.");
+  }
+
+  return dedupeReviewSteps(steps).slice(0, 4);
+}
+
+function reviewStepForCheck(check: EdaCheckItem): string {
+  if (check.id === "preview_availability") {
+    return "Open the source file manually to confirm a usable table is available.";
+  }
+  if (check.id === "preview_missingness" || check.id === "column_missingness") {
+    return "Check missing or empty values in the full dataset, not only the preview.";
+  }
+  if (check.id === "uniform_values") {
+    return "Confirm whether repeated values are expected or caused by a limited preview.";
+  }
+  if (check.id === "metadata_documentation") {
+    return "Find source documentation or methodology before interpreting the values.";
+  }
+  if (check.id === "metadata_timeliness") {
+    return "Confirm the latest update date matches the period in your planning question.";
+  }
+  if (check.id === "schema_visibility") {
+    return "Inspect the source columns and document which fields you will use.";
+  }
+  if (check.id === "metadata_quality") {
+    return "Verify the catalog metadata against the source record.";
+  }
+  return check.message || "Review this issue before analysis.";
+}
+
+function dedupeReviewSteps(steps: string[]): string[] {
+  const seen = new Set<string>();
+  return steps.filter((step) => {
+    const normalized = step.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 
@@ -619,9 +693,14 @@ function qualityCheckCardClass(status: string): string {
 function QualityCheckCard({ check }: { check: EdaCheckItem }) {
   return (
     <article className={qualityCheckCardClass(check.status)}>
-      <Badge variant="outline" className={`${edaCheckStatusClass(check.status)} font-normal`}>
-        {formatEdaCheckStatus(check.status)}
-      </Badge>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+          {formatQualityCheckDimension(check.id)}
+        </span>
+        <Badge variant="outline" className={`${edaCheckStatusClass(check.status)} font-normal`}>
+          {formatEdaCheckStatus(check.status)}
+        </Badge>
+      </div>
       <p className="mt-2 text-sm text-neutral-700 leading-relaxed">{check.message}</p>
     </article>
   );
@@ -629,15 +708,18 @@ function QualityCheckCard({ check }: { check: EdaCheckItem }) {
 
 function QualityCheckCards({ checks }: { checks: EdaCheckItem[] }) {
   if (checks.length === 0) {
-    return <p className="text-sm text-neutral-500">No quality checks were run.</p>;
+    return <p className="text-sm text-neutral-500">No review checks were run.</p>;
   }
 
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-      {checks.map((check) => (
-        <QualityCheckCard key={`${check.id}-${check.message}`} check={check} />
-      ))}
-    </div>
+    <section>
+      <p className="mb-2 text-sm font-semibold text-neutral-900">Review evidence</p>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {checks.map((check) => (
+          <QualityCheckCard key={`${check.id}-${check.message}`} check={check} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -651,9 +733,6 @@ function DatasetNotesField({
   return (
     <div className="space-y-2 pt-1">
       <p className="text-sm font-semibold text-neutral-900">Notes</p>
-      <p className="text-xs text-neutral-500">
-        Add local context, stakeholder trust, or reasons to include this dataset despite its score.
-      </p>
       <Textarea
         value={note}
         onChange={(event) => onNoteChange(event.target.value)}
@@ -672,6 +751,17 @@ function formatEdaCheckStatus(status: string): string {
   return "Unknown";
 }
 
+function formatQualityCheckDimension(id: string): string {
+  if (id === "preview_availability") return "Preview access";
+  if (id === "preview_missingness" || id === "column_missingness") return "Completeness";
+  if (id === "uniform_values") return "Value spread";
+  if (id === "metadata_documentation") return "Documentation";
+  if (id === "metadata_timeliness") return "Freshness";
+  if (id === "schema_visibility") return "Structure";
+  if (id === "metadata_quality") return "Metadata";
+  return "Review check";
+}
+
 function edaCheckStatusClass(status: string): string {
   if (status === "good") return "border-emerald-200 bg-emerald-50 text-emerald-800";
   if (status === "caution") return "border-amber-200 bg-amber-50 text-amber-800";
@@ -680,128 +770,11 @@ function edaCheckStatusClass(status: string): string {
 }
 
 function formatReadinessBandLabel(band?: string): string {
-  if (!band) return "Not assessed";
-  if (band === "ready_for_exploration") return "Ready to explore";
-  if (band === "usable_with_checks") return "Usable, check details";
-  if (band === "metadata_only_review") return "Catalog only — open the file";
+  if (!band) return "Review checks could not assign a status.";
+  if (band === "ready_for_exploration") return "Relevant dataset with no major issues in the available preview. Spot-check before analysis.";
+  if (band === "usable_with_checks") return "Relevant dataset, but review the checks below before using it.";
+  if (band === "metadata_only_review") return "Relevant dataset, but only catalog metadata could be checked. Open the source file before analysis.";
   return band.replace(/_/g, " ");
-}
-
-function scoreTextClass(score: number): string {
-  if (score >= 75) return "text-emerald-700";
-  if (score >= 50) return "text-amber-700";
-  return "text-red-700";
-}
-
-function topProfileIssue(insight: DatasetFitInsight): string | null {
-  const score = getInsightFitScore(insight);
-  const band = getInsightFitBand(insight);
-  const checks = insight.eda_interpretation?.quality_checks || [];
-  const caution = checks.find((check) => check.status === "caution");
-  if (caution) {
-    const message = caution.message;
-    const trimmed = message.length > 40 ? `${message.slice(0, 37)}…` : message;
-    return `F${score} · ${trimmed}`;
-  }
-  if (band === "limited") return `F${score} · limited fit`;
-  if (band === "usable") return `F${score} · usable fit`;
-  return `F${score}`;
-}
-
-function shortReadinessLabel(band?: string): string {
-  if (band === "ready_for_exploration") return "Ready";
-  if (band === "usable_with_checks") return "Check";
-  if (band === "metadata_only_review") return "Catalog";
-  return "Review";
-}
-
-function matchBandForInsight(insight: DatasetFitInsight, dataset?: Dataset): "strong" | "partial" | "weak" {
-  if (dataset) return getDatasetCompatibilityBand(dataset);
-  if (insight.fit_score >= 75) return "strong";
-  if (insight.fit_score >= 50) return "partial";
-  return "weak";
-}
-
-function CrossDatasetSelectionSummary({
-  insights,
-  datasetsById,
-}: {
-  insights: DatasetFitInsight[];
-  datasetsById: Map<string, Dataset>;
-}) {
-  if (insights.length === 0) return null;
-
-  const matchCounts = { strong: 0, partial: 0, weak: 0 };
-  const readinessCounts = { ready: 0, check: 0, metadata: 0, other: 0 };
-
-  for (const insight of insights) {
-    const dataset = datasetsById.get(insight.dataset_id);
-    matchCounts[matchBandForInsight(insight, dataset)] += 1;
-    const band = insight.eda_interpretation?.readiness_band;
-    if (band === "ready_for_exploration") readinessCounts.ready += 1;
-    else if (band === "usable_with_checks") readinessCounts.check += 1;
-    else if (band === "metadata_only_review") readinessCounts.metadata += 1;
-    else readinessCounts.other += 1;
-  }
-
-  const matchParts = [
-    matchCounts.strong > 0 ? `${matchCounts.strong} strong` : null,
-    matchCounts.partial > 0 ? `${matchCounts.partial} partial` : null,
-    matchCounts.weak > 0 ? `${matchCounts.weak} weak` : null,
-  ].filter(Boolean);
-
-  const readinessParts = [
-    readinessCounts.ready > 0 ? `${readinessCounts.ready} ready` : null,
-    readinessCounts.check > 0 ? `${readinessCounts.check} need checks` : null,
-    readinessCounts.metadata > 0 ? `${readinessCounts.metadata} metadata-only` : null,
-    readinessCounts.other > 0 ? `${readinessCounts.other} to review` : null,
-  ].filter(Boolean);
-
-  const showChips = insights.length <= 4;
-
-  return (
-    <div className="mb-4 rounded-md border border-neutral-200 bg-neutral-50 px-3 py-2.5">
-      <p className="text-sm text-neutral-700">
-        <span className="font-medium">
-          {insights.length} dataset{insights.length === 1 ? "" : "s"}
-        </span>
-        {matchParts.length > 0 && (
-          <>
-            {" · "}
-            {matchParts.join(", ")} match
-          </>
-        )}
-        {readinessParts.length > 0 && (
-          <>
-            {" · "}
-            {readinessParts.join(", ")}
-          </>
-        )}
-      </p>
-      {showChips && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {insights.map((insight) => {
-            const dataset = datasetsById.get(insight.dataset_id);
-            const title = dataset?.name || insight.title;
-            const shortTitle = title.length > 36 ? `${title.slice(0, 33)}…` : title;
-            const profileIssue = topProfileIssue(insight);
-            const chipTitle = profileIssue ? `${title} — ${profileIssue}` : title;
-            return (
-              <Badge
-                key={insight.dataset_id}
-                variant="secondary"
-                className="max-w-full truncate text-[11px] font-normal"
-                title={chipTitle}
-              >
-                {shortTitle} · {shortReadinessLabel(insight.eda_interpretation?.readiness_band)}
-                {profileIssue ? ` · ${profileIssue.length > 40 ? `${profileIssue.slice(0, 37)}…` : profileIssue}` : ""}
-              </Badge>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function FieldList({
@@ -820,29 +793,6 @@ function FieldList({
       <p className="font-medium text-neutral-800">
         {items.length > 0 ? items.slice(0, 3).join(", ") : "Not detected"}
       </p>
-    </div>
-  );
-}
-
-function ListPanel({
-  title,
-  items,
-  tone = "neutral",
-}: {
-  title: string;
-  items: string[];
-  tone?: "neutral" | "amber";
-}) {
-  if (items.length === 0) return null;
-  const panelClass =
-    tone === "amber"
-      ? "border-amber-200 bg-amber-50"
-      : "border-neutral-200 bg-white";
-  const titleClass = tone === "amber" ? "text-amber-900" : "text-neutral-900";
-  return (
-    <div className={`border rounded-md p-3 ${panelClass}`}>
-      <p className={`text-sm font-medium mb-2 ${titleClass}`}>{title}</p>
-      <ListBlock items={items} tone={tone} />
     </div>
   );
 }
@@ -993,46 +943,9 @@ function formatDatasetFormats(formats?: string[]): string[] {
   return cleanFormats.length ? cleanFormats : ["FORMAT NOT LISTED"];
 }
 
-function formatFitSummary(summary: string, datasetTitles: string[], recommendedRole: string): string {
-  let text = summary.trim();
-
-  for (const title of datasetTitles) {
-    const cleanTitle = title.trim();
-    if (!cleanTitle) continue;
-    text = text.replace(new RegExp(`^${escapeRegExp(cleanTitle)}\\s+`, "i"), "");
-  }
-
-  text = stripRepeatedRole(text, recommendedRole);
-
-  const usefulMatch = text.match(/^(?:is useful as|useful as)\s+(.+?)\s+because it contains\s+(.+?)\.?$/i);
-  if (usefulMatch) {
-    return `${capitalizeFirst(usefulMatch[1])}. Contains ${usefulMatch[2]}.`;
-  }
-
-  if (/^has weak direct evidence/i.test(text)) {
-    return text.replace(/^has/i, "Has");
-  }
-
-  return text;
-}
-
-function stripRepeatedRole(summary: string, recommendedRole: string): string {
-  const role = recommendedRole.trim();
-  if (!role) return summary;
-  return summary.replace(new RegExp(`^${escapeRegExp(role)}\\.?:?\\s*`, "i"), "");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function capitalizeFirst(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
 function formatRecommendedRoleUse(role: string): string {
   const normalized = role.toLowerCase();
-  if (!role.trim()) return "a supporting dataset to inspect alongside the stronger matches.";
+  if (!role.trim()) return "a supporting dataset to inspect alongside the stronger selected datasets.";
   if (normalized.includes("not recommended")) return "not recommended for this planning question.";
   if (normalized.includes("green space")) {
     return "the green-space numerator, providing the park or green-area value you would measure.";

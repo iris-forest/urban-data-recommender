@@ -6,6 +6,15 @@ This is the Vite/React frontend for the Urban Planner Dataset Assistant.
 
 Use pnpm 11 for this frontend. `pnpm-workspace.yaml` keeps pnpm's store, cache, and state files inside this folder, and `pnpm-lock.yaml` is the only tracked frontend package lockfile.
 
+From the repository root, the fastest fresh-checkout path is:
+
+```bash
+./scripts/setup.sh
+./scripts/dev.sh
+```
+
+The root dev script starts the FastAPI backend and this Vite app together.
+
 Install dependencies with the repo-local pnpm store:
 
 ```bash
@@ -27,5 +36,3 @@ corepack prepare pnpm@11.0.5 --activate
 pnpm install --frozen-lockfile --store-dir .pnpm-store
 pnpm run build
 ```
-
-For Docker, build from the repository root with `docker compose build frontend` or `docker build -f frontend/Dockerfile .` so the Dockerfile can copy the frontend manifest and pnpm lockfile from the expected context.

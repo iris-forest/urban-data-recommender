@@ -76,11 +76,6 @@ export function DatasetCard({
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1">
               <div className="flex flex-wrap items-center gap-2 mb-2">
-                {dataset.essential && (
-                  <Badge variant="default" className="bg-blue-600">
-                    Recommended
-                  </Badge>
-                )}
                 <InfoBadge
                   label={`${compatibilityBandLabel(dataset)} ${formatCompatibilityScore(compatibilityScore)}`}
                   description={formatCompatibilityTooltip(dataset)}

@@ -936,8 +936,6 @@ def _compatibility_evidence(
             "We did not find clear mentions of your themes in the dataset title, "
             "description, or fields."
         )
-    summary += f" Fit score: {round(semantic_score * 100)}%."
-
     return {
         "matched_concepts": matched_concepts,
         "missing_concepts": missing_concepts,

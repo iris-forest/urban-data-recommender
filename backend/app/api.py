@@ -551,7 +551,7 @@ async def semantic_search(request: SemanticSearchRequest) -> SemanticSearchRespo
 
 @app.post("/package/create")
 async def create_package(request: PackageCreateRequest):
-    """Create a downloadable zip package for selected dataset summaries."""
+    """Create a downloadable zip package with metadata, docs, and source files when available."""
     try:
         package_bytes, resolved_ids = build_package_for_query(
             dataset_ids=request.dataset_ids,

@@ -9,8 +9,16 @@ from __future__ import annotations
 from dataclasses import asdict
 from io import BytesIO
 import json
+import mimetypes
+import re
 import zipfile
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
+
+try:
+    import requests
+except ImportError:  # pragma: no cover - package download degrades gracefully
+    requests = None
 
 from .catalog import load_persisted_summaries
 from .dataset_metadata import (
@@ -19,6 +27,12 @@ from .dataset_metadata import (
     infer_dataset_provenance,
 )
 from .models import DatasetSummary, Dataset
+
+MAX_RESOURCE_BYTES = 25_000_000
+MAX_RESOURCES_PER_DATASET = 8
+DOWNLOAD_CHUNK_SIZE = 65_536
+DOWNLOAD_TIMEOUT = (5, 20)
+RESERVED_TEST_HOST_SUFFIXES = (".test", ".invalid", ".localhost")
 
 
 def _summary_index() -> Dict[str, DatasetSummary]:
@@ -218,6 +232,8 @@ def build_dataset_package(
         dataset_notes=dataset_notes,
     )
 
+    resource_downloads: List[Dict[str, object]] = []
+
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         zf.writestr(
@@ -226,13 +242,15 @@ def build_dataset_package(
                 [
                     f"# {package_name}",
                     "",
-                    "This package contains generated dataset documentation and summary metadata.",
-                    "Raw source files are not bundled in this repository snapshot; see the per-dataset source URLs and notes for acquisition details.",
+                    "This package contains selected dataset metadata, generated documentation, and source files when their public URLs could be downloaded.",
+                    "If a source file could not be bundled, see dataset_downloads.json and the per-dataset source URLs for manual acquisition details.",
                     "",
                     "Included files:",
                     "- manifest.json",
+                    "- dataset_downloads.json",
                     "- summaries/*.json",
                     "- docs/*.md",
+                    "- datasets/* when source files are downloadable",
                     "",
                 ]
             ).strip() + "\n",
@@ -241,9 +259,229 @@ def build_dataset_package(
         for summary, dataset in resolved:
             zf.writestr(f"summaries/{summary.id}.json", json.dumps(asdict(summary), ensure_ascii=False, indent=2))
             zf.writestr(f"docs/{summary.id}.md", _summary_to_readme(summary, dataset))
+            if dataset is not None:
+                _write_dataset_resources(zf, summary, dataset, resource_downloads)
+
+        zf.writestr("dataset_downloads.json", json.dumps(resource_downloads, ensure_ascii=False, indent=2))
 
     buffer.seek(0)
     return buffer.read()
+
+
+def _write_dataset_resources(
+    zf: zipfile.ZipFile,
+    summary: DatasetSummary,
+    dataset: Dataset,
+    report: List[Dict[str, object]],
+) -> None:
+    resources = dataset_resources(dataset)
+    if not resources:
+        report.append(
+            {
+                "dataset_id": summary.id,
+                "resource_name": "",
+                "url": dataset.api_url or summary.source_url or "",
+                "included": False,
+                "path": "",
+                "bytes": 0,
+                "reason": "No downloadable source resources were listed for this dataset.",
+            }
+        )
+        return
+
+    used_paths = set()
+    for index, resource in enumerate(resources[:MAX_RESOURCES_PER_DATASET]):
+        path, content, entry = _download_resource_file(summary, resource, index, used_paths)
+        if path and content is not None:
+            zf.writestr(path, content)
+            used_paths.add(path)
+        report.append(entry)
+
+    if len(resources) > MAX_RESOURCES_PER_DATASET:
+        report.append(
+            {
+                "dataset_id": summary.id,
+                "resource_name": "",
+                "url": "",
+                "included": False,
+                "path": "",
+                "bytes": 0,
+                "reason": f"Only the first {MAX_RESOURCES_PER_DATASET} listed resources were considered.",
+            }
+        )
+
+
+def _download_resource_file(
+    summary: DatasetSummary,
+    resource: Dict[str, str],
+    index: int,
+    used_paths: set,
+) -> Tuple[Optional[str], Optional[bytes], Dict[str, object]]:
+    url = str(resource.get("url") or "").strip()
+    resource_name = str(resource.get("name") or "").strip() or f"Source file {index + 1}"
+    entry: Dict[str, object] = {
+        "dataset_id": summary.id,
+        "resource_name": resource_name,
+        "format": str(resource.get("format") or "").strip(),
+        "url": url,
+        "included": False,
+        "path": "",
+        "bytes": 0,
+        "reason": "",
+    }
+
+    if _is_source_record_resource(resource):
+        entry["reason"] = "Catalog record link is included in the manifest, not bundled as a dataset file."
+        return None, None, entry
+    if requests is None:
+        entry["reason"] = "Python requests is not installed, so source files could not be downloaded."
+        return None, None, entry
+    if not _is_http_url(url):
+        entry["reason"] = "Resource URL is not an HTTP(S) download link."
+        return None, None, entry
+    if _is_reserved_test_url(url):
+        entry["reason"] = "Reserved test URL was not fetched."
+        return None, None, entry
+
+    content, content_type, reason = _download_resource_bytes(url)
+    if content is None:
+        entry["reason"] = reason
+        return None, None, entry
+
+    path = _unique_resource_path(summary, resource, index, content_type, used_paths)
+    entry.update(
+        {
+            "included": True,
+            "path": path,
+            "bytes": len(content),
+            "reason": "Downloaded from source URL.",
+        }
+    )
+    return path, content, entry
+
+
+def _download_resource_bytes(url: str) -> Tuple[Optional[bytes], str, str]:
+    assert requests is not None
+    try:
+        response = requests.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True)
+        try:
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            content_length = _parse_int(response.headers.get("content-length"))
+            if content_length and content_length > MAX_RESOURCE_BYTES:
+                return None, content_type, f"Source file is larger than the {MAX_RESOURCE_BYTES // 1_000_000} MB package limit."
+
+            chunks: List[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_RESOURCE_BYTES:
+                    return None, content_type, f"Source file exceeded the {MAX_RESOURCE_BYTES // 1_000_000} MB package limit."
+                chunks.append(chunk)
+            return b"".join(chunks), content_type, ""
+        finally:
+            response.close()
+    except Exception as exc:  # pragma: no cover - network availability is intentionally best-effort
+        return None, "", f"Source file download failed: {exc}"
+
+
+def _unique_resource_path(
+    summary: DatasetSummary,
+    resource: Dict[str, str],
+    index: int,
+    content_type: str,
+    used_paths: set,
+) -> str:
+    dataset_dir = _safe_path_part(summary.id, "dataset")
+    filename = _resource_filename(resource, index, content_type)
+    base_path = f"datasets/{dataset_dir}/{filename}"
+    if base_path not in used_paths:
+        return base_path
+
+    stem, dot, extension = filename.rpartition(".")
+    stem = stem if dot else filename
+    suffix = f".{extension}" if dot else ""
+    counter = 2
+    while True:
+        candidate = f"datasets/{dataset_dir}/{stem}-{counter}{suffix}"
+        if candidate not in used_paths:
+            return candidate
+        counter += 1
+
+
+def _resource_filename(resource: Dict[str, str], index: int, content_type: str) -> str:
+    url_path = urlparse(str(resource.get("url") or "")).path
+    url_name = url_path.rsplit("/", 1)[-1] if url_path else ""
+    raw_name = str(resource.get("name") or "").strip() or url_name or f"resource-{index + 1}"
+    filename = _safe_path_part(raw_name, f"resource-{index + 1}")
+    if "." not in filename:
+        filename += _resource_extension(resource, url_name, content_type)
+    return f"{index + 1:02d}-{filename}"
+
+
+def _resource_extension(resource: Dict[str, str], url_name: str, content_type: str) -> str:
+    fmt = str(resource.get("format") or "").strip().lower().replace(".", "")
+    format_extensions = {
+        "csv": ".csv",
+        "tsv": ".tsv",
+        "txt": ".txt",
+        "json": ".json",
+        "geojson": ".geojson",
+        "xls": ".xls",
+        "xlsx": ".xlsx",
+        "xml": ".xml",
+        "zip": ".zip",
+        "pdf": ".pdf",
+        "kml": ".kml",
+        "shp": ".shp",
+    }
+    if fmt in format_extensions:
+        return format_extensions[fmt]
+
+    suffix = _extension_from_url_name(url_name)
+    if suffix:
+        return suffix
+
+    guessed = mimetypes.guess_extension(content_type.split(";", 1)[0].strip()) if content_type else ""
+    return guessed or ".dat"
+
+
+def _extension_from_url_name(value: str) -> str:
+    candidate = value.rsplit("/", 1)[-1].split("?", 1)[0]
+    if "." not in candidate:
+        return ""
+    suffix = "." + candidate.rsplit(".", 1)[-1].lower()
+    return suffix if re.match(r"^\.[a-z0-9]{1,8}$", suffix) else ""
+
+
+def _safe_path_part(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value).strip()).strip(".-_")
+    return (cleaned or fallback)[:120]
+
+
+def _is_source_record_resource(resource: Dict[str, str]) -> bool:
+    name = str(resource.get("name") or "").strip().lower()
+    fmt = str(resource.get("format") or "").strip()
+    return name == "source record" and not fmt
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _is_reserved_test_url(value: str) -> bool:
+    hostname = (urlparse(value).hostname or "").lower()
+    return hostname == "example.test" or any(hostname.endswith(suffix) for suffix in RESERVED_TEST_HOST_SUFFIXES)
+
+
+def _parse_int(value: object) -> int:
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return 0
 
 
 def build_package_manifest(

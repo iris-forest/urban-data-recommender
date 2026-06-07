@@ -29,11 +29,13 @@ import {
   Eye,
   HelpCircle,
   LayoutGrid,
+  LayoutDashboard,
   List,
   Loader,
+  X,
 } from "lucide-react";
 import { DatasetCard } from "./DatasetCard";
-import { DatasetDetailPanel } from "./DatasetDetailPanel";
+import { DatasetDetailContent, DatasetDetailPanel } from "./DatasetDetailPanel";
 import { appStore } from "../store";
 import { Dataset } from "../types";
 import {
@@ -41,18 +43,20 @@ import {
   convertApiDatasetToReactDataset,
   extractYearFromDate,
 } from "../api";
-import {
-  technicalQualityScore,
-} from "../qualityDisplay";
 import { formatThemeName, getCatalogMainCategoryLabels, getDatasetCategoryDisplay } from "../themeTaxonomy";
 import {
+  getDatasetCoverageSummary,
+  uniqueThemeIds,
+} from "../datasetCoverage";
+import {
+  compatibilityBadgeClass as datasetCompatibilityBadgeClass,
   compatibilityScoreClass as datasetCompatibilityScoreClass,
   formatCompatibilityScore as formatDatasetCompatibilityScore,
   formatCompatibilityTooltip,
   getDatasetCompatibilityScore,
 } from "../compatibilityDisplay";
 
-type DatasetViewMode = "cards" | "table";
+type DatasetViewMode = "board" | "cards" | "table";
 
 const RECOMMENDATION_LOADING_STATUSES = [
   "Reading your selected data themes...",
@@ -63,6 +67,7 @@ const RECOMMENDATION_LOADING_STATUSES = [
   "Preparing the dataset list...",
 ];
 const LOADING_STATUS_ROTATION_MS = 3600;
+const ROLE_SECTION_PREVIEW_LIMIT = 4;
 
 function datasetCompatibilityValue(dataset: Dataset): number {
   const score = getDatasetCompatibilityScore(dataset);
@@ -89,15 +94,7 @@ function compareDatasetStrength(a: Dataset, b: Dataset): number {
   const scoreB = b.relevanceScore ?? 0;
   if (scoreA !== scoreB) return scoreB - scoreA;
 
-  const qualityA = datasetQualityScore(a);
-  const qualityB = datasetQualityScore(b);
-  if (qualityA !== qualityB) return qualityB - qualityA;
-
   return a.name.localeCompare(b.name);
-}
-
-function datasetQualityScore(dataset: Dataset): number {
-  return technicalQualityScore(dataset);
 }
 
 export function DatasetResults() {
@@ -110,7 +107,7 @@ export function DatasetResults() {
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCategory, setFilterCategory] = useState<string>("all");
   const [filterSource, setFilterSource] = useState<string>("all");
-  const [viewMode, setViewMode] = useState<DatasetViewMode>("table");
+  const [viewMode, setViewMode] = useState<DatasetViewMode>("board");
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 20;
   const [isLoading, setIsLoading] = useState(true);
@@ -270,7 +267,10 @@ export function DatasetResults() {
   const totalPages = Math.max(1, Math.ceil(filteredDatasets.length / pageSize));
   const safeCurrentPage = Math.min(currentPage, totalPages);
   const pageStart = (safeCurrentPage - 1) * pageSize;
-  const visibleDatasets = filteredDatasets.slice(pageStart, pageStart + pageSize);
+  const visibleDatasets =
+    viewMode === "board"
+      ? filteredDatasets
+      : filteredDatasets.slice(pageStart, pageStart + pageSize);
 
   const handleToggleDataset = (dataset: Dataset) => {
     const newSelected = new Set(selectedDatasets);
@@ -312,7 +312,7 @@ export function DatasetResults() {
   const handleContinue = () => {
     if (missingRecommended.length > 0) {
       const confirmed = window.confirm(
-        `You have not selected ${missingRecommended.length} recommended dataset(s). Continue to fit review anyway?`
+        `You have not selected ${missingRecommended.length} preselected high-fit dataset(s). Continue to data quality review anyway?`
       );
       if (!confirmed) return;
     }
@@ -402,7 +402,7 @@ export function DatasetResults() {
         <div className="bg-white rounded-lg shadow-sm border border-neutral-200 p-6">
           <h1 className="text-2xl mb-2">Available Datasets for Madrid</h1>
           <p className="text-neutral-600 max-w-3xl">
-            Review datasets sorted by semantic compatibility with your planning question. Recommended datasets are pre-selected only after the backend evidence gate passes.
+            Review datasets by the role they can play in answering your planning question. Match scores show role usefulness, not whether one dataset answers the whole indicator alone.
           </p>
           {indicatorRequest?.description && (
             <div className="mt-4 rounded-md border border-neutral-200 bg-neutral-50 p-4">
@@ -467,17 +467,17 @@ export function DatasetResults() {
           </div>
         </div>
 
-        {/* Selection quality warning before continuing to fit review */}
+        {/* Selection quality warning before continuing to data quality review */}
         {missingRecommended.length > 0 && (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex gap-3">
             <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm">
               <p className="text-amber-900 font-medium mb-1">
-                Some Recommended Datasets Are Not Selected
+                Some Preselected High-Fit Datasets Are Not Selected
               </p>
               <p className="text-amber-800">
-                You have not selected {missingRecommended.length} recommended dataset(s).
-                This may leave useful evidence out of the fit review.
+                You have not selected {missingRecommended.length} preselected high-fit dataset(s).
+                This may leave useful evidence out of the data quality review.
               </p>
             </div>
           </div>
@@ -503,7 +503,7 @@ export function DatasetResults() {
           </div>
         )}
 
-        {filteredDatasets.length > pageSize && (
+        {viewMode !== "board" && filteredDatasets.length > pageSize && (
           <div className="bg-white rounded-lg border border-neutral-200 p-4 flex items-center justify-between gap-3">
             <div className="text-sm text-neutral-600">
               Showing {pageStart + 1}-{Math.min(pageStart + pageSize, filteredDatasets.length)} of {filteredDatasets.length} datasets
@@ -548,7 +548,7 @@ export function DatasetResults() {
             disabled={selectedDatasets.size === 0}
             className="flex-1 gap-2"
           >
-            Continue to Fit Review
+            Continue to Data Quality Review
             <ArrowRight className="w-4 h-4" />
           </Button>
           </div>
@@ -588,6 +588,17 @@ function DatasetResultsView({
 }: DatasetResultsViewProps) {
   const preferredThemeIds = appStore.getExtractedThemes();
 
+  if (viewMode === "board") {
+    return (
+      <DatasetRoleBoard
+        datasets={datasets}
+        selectedDatasets={selectedDatasets}
+        onToggle={onToggle}
+        onViewDetails={onViewDetails}
+      />
+    );
+  }
+
   if (viewMode === "table") {
     return (
       <div className="bg-white rounded-lg border border-neutral-200 overflow-hidden">
@@ -598,13 +609,13 @@ function DatasetResultsView({
               <TableHead>Dataset</TableHead>
               <TableHead>
                 <div className="flex items-center gap-1">
-                  Compatibility
+                  Match
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <HelpCircle className="w-3.5 h-3.5 text-neutral-400" />
                     </TooltipTrigger>
                     <TooltipContent>
-                      Based on semantic similarity, focused evidence, geography, and time alignment with the planning question.
+                      Role usefulness for the planning question. A high score can mean this dataset is a strong input, not a complete answer by itself.
                     </TooltipContent>
                   </Tooltip>
                 </div>
@@ -668,6 +679,14 @@ function DatasetViewToggle({
     >
       <Tooltip>
         <TooltipTrigger asChild>
+          <ToggleGroupItem value="board" aria-label="Role board" className="px-3">
+            <LayoutDashboard className="w-4 h-4" />
+          </ToggleGroupItem>
+        </TooltipTrigger>
+        <TooltipContent>Role board</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
           <ToggleGroupItem value="cards" aria-label="Card view" className="px-3">
             <LayoutGrid className="w-4 h-4" />
           </ToggleGroupItem>
@@ -683,6 +702,385 @@ function DatasetViewToggle({
         <TooltipContent>List view</TooltipContent>
       </Tooltip>
     </ToggleGroup>
+  );
+}
+
+function DatasetRoleBoard({
+  datasets,
+  selectedDatasets,
+  onToggle,
+  onViewDetails,
+}: {
+  datasets: Dataset[];
+  selectedDatasets: Set<string>;
+  onToggle: (dataset: Dataset) => void;
+  onViewDetails: (dataset: Dataset) => void;
+}) {
+  const requiredThemeIds = uniqueThemeIds(appStore.getExtractedThemes());
+  const [pickerSection, setPickerSection] = useState<{
+    id: string;
+    title: string;
+    datasets: Dataset[];
+  } | null>(null);
+
+  if (requiredThemeIds.length === 0) {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {datasets.map((dataset: Dataset) => (
+          <DatasetCard
+            key={dataset.id}
+            dataset={dataset}
+            isSelected={selectedDatasets.has(dataset.id)}
+            onToggle={onToggle}
+            onViewDetails={onViewDetails}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  const summaries = new Map(
+    datasets.map((dataset) => [dataset.id, getDatasetCoverageSummary(dataset, requiredThemeIds)])
+  );
+  const assignedDatasetIds = new Set<string>();
+  const roleSections = requiredThemeIds.map((themeId) => {
+    const sectionDatasets = datasets.filter((dataset) => summaries.get(dataset.id)?.bestRoleThemeId === themeId);
+    sectionDatasets.forEach((dataset) => assignedDatasetIds.add(dataset.id));
+    return {
+      id: themeId,
+      label: formatThemeName(themeId),
+      datasets: sectionDatasets,
+    };
+  });
+  const otherDatasets = datasets.filter((dataset) => !assignedDatasetIds.has(dataset.id));
+  const sections = otherDatasets.length > 0
+    ? [
+        ...roleSections,
+        {
+          id: "other-useful-datasets",
+          label: "Other useful datasets",
+          datasets: otherDatasets,
+        },
+      ]
+    : roleSections;
+
+  return (
+    <div className="space-y-4">
+      <div className="relative -mx-6 overflow-hidden pl-6">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-y-0 right-0 z-10 w-14 bg-gradient-to-l from-neutral-50 to-transparent"
+        />
+        <div className="flex snap-x gap-4 overflow-x-auto pb-3 pr-16">
+          {sections.map((section) => (
+            <RoleBoardSection
+              key={section.id}
+              id={section.id}
+              title={section.label}
+              datasets={section.datasets}
+              selectedDatasets={selectedDatasets}
+              onOpenPicker={setPickerSection}
+              onToggleDataset={onToggle}
+              onViewDetails={onViewDetails}
+            />
+          ))}
+        </div>
+      </div>
+
+      {pickerSection && (
+        <RoleDatasetPickerModal
+          title={pickerSection.title}
+          datasets={pickerSection.datasets}
+          preferredThemeIds={requiredThemeIds}
+          selectedDatasets={selectedDatasets}
+          onToggleDataset={onToggle}
+          onClose={() => setPickerSection(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function RoleBoardSection({
+  id,
+  title,
+  datasets,
+  selectedDatasets,
+  onOpenPicker,
+  onToggleDataset,
+  onViewDetails,
+}: {
+  id: string;
+  title: string;
+  datasets: Dataset[];
+  selectedDatasets: Set<string>;
+  onOpenPicker: (section: { id: string; title: string; datasets: Dataset[] }) => void;
+  onToggleDataset: (dataset: Dataset) => void;
+  onViewDetails: (dataset: Dataset) => void;
+}) {
+  const visibleDatasets = datasets.slice(0, ROLE_SECTION_PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, datasets.length - visibleDatasets.length);
+
+  return (
+    <section className="flex min-h-0 w-[21rem] shrink-0 snap-start flex-col rounded-lg border border-neutral-200 bg-neutral-100/70 md:w-[23rem] xl:w-[25rem]">
+      <div className="flex flex-col gap-2 border-b border-neutral-200 px-3 py-3">
+        <div>
+          <h3 className="font-semibold text-neutral-900">{title}</h3>
+          <p className="text-sm text-neutral-500">
+            {datasets.length > 0
+              ? `${datasets.length} dataset${datasets.length === 1 ? "" : "s"} can help with this role`
+              : "No datasets in the current filters are assigned to this role"}
+          </p>
+        </div>
+        {datasets.length > ROLE_SECTION_PREVIEW_LIMIT && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-fit px-0 text-blue-700 hover:bg-transparent"
+            onClick={() => onOpenPicker({ id, title, datasets })}
+          >
+            Add datasets
+          </Button>
+        )}
+      </div>
+
+      {visibleDatasets.length > 0 ? (
+        <div className="flex flex-col gap-3 p-3">
+          {visibleDatasets.map((dataset) => (
+            <RoleDatasetCard
+              key={dataset.id}
+              dataset={dataset}
+              isSelected={selectedDatasets.has(dataset.id)}
+              onToggle={onToggleDataset}
+              onViewDetails={onViewDetails}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="p-3 text-sm text-neutral-500">
+          Try clearing filters or use the list view to inspect broader candidates.
+        </div>
+      )}
+
+      {hiddenCount > 0 && (
+        <div className="border-t border-neutral-200 px-3 py-2 text-xs text-neutral-500">
+          Showing top {ROLE_SECTION_PREVIEW_LIMIT}; {hiddenCount} more hidden.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RoleDatasetPickerModal({
+  title,
+  datasets,
+  preferredThemeIds,
+  selectedDatasets,
+  onToggleDataset,
+  onClose,
+}: {
+  title: string;
+  datasets: Dataset[];
+  preferredThemeIds: string[];
+  selectedDatasets: Set<string>;
+  onToggleDataset: (dataset: Dataset) => void;
+  onClose: () => void;
+}) {
+  const selectedCount = datasets.filter((dataset) => selectedDatasets.has(dataset.id)).length;
+  const [detailDataset, setDetailDataset] = useState<Dataset | null>(null);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label={detailDataset ? `${detailDataset.name} details` : `Add datasets for ${title}`}
+    >
+      <div className="flex max-h-[88vh] w-full max-w-4xl flex-col rounded-lg bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-4 border-b border-neutral-200 p-5">
+          <div className="min-w-0">
+            {detailDataset ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="mb-2 gap-2 px-0 text-blue-700 hover:bg-transparent"
+                onClick={() => setDetailDataset(null)}
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back to datasets
+              </Button>
+            ) : null}
+            <h3 className="text-lg font-semibold text-neutral-950">
+              {detailDataset ? detailDataset.name : `Add datasets for ${title}`}
+            </h3>
+            {!detailDataset && (
+              <p className="mt-1 text-sm text-neutral-600">
+                Select datasets for this indicator role. {selectedCount} of {datasets.length} selected.
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-2 hover:bg-neutral-100"
+            aria-label="Close dataset picker"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {detailDataset ? (
+          <div className="min-h-0 overflow-y-auto">
+            <DatasetDetailContent dataset={detailDataset} preferredThemeIds={preferredThemeIds} />
+          </div>
+        ) : (
+          <>
+            <div className="min-h-0 overflow-y-auto p-3">
+              <div className="divide-y divide-neutral-100 rounded-md border border-neutral-200">
+                {datasets.map((dataset) => (
+                  <RoleDatasetPickerRow
+                    key={dataset.id}
+                    dataset={dataset}
+                    isSelected={selectedDatasets.has(dataset.id)}
+                    onToggle={onToggleDataset}
+                    onViewDetails={setDetailDataset}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="flex justify-end border-t border-neutral-200 p-4">
+              <Button type="button" onClick={onClose}>
+                Done
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoleDatasetPickerRow({
+  dataset,
+  isSelected,
+  onToggle,
+  onViewDetails,
+}: {
+  dataset: Dataset;
+  isSelected: boolean;
+  onToggle: (dataset: Dataset) => void;
+  onViewDetails: (dataset: Dataset) => void;
+}) {
+  const compatibilityScore = getDatasetCompatibilityScore(dataset);
+  const publishedYear = extractYearFromDate(dataset.publicationDate);
+
+  return (
+    <div className={`flex items-start gap-3 p-3 ${isSelected ? "bg-blue-50/60" : "bg-white"}`}>
+      <button
+        type="button"
+        onClick={() => onToggle(dataset)}
+        aria-label={isSelected ? "Deselect dataset" : "Select dataset"}
+        className="mt-1 shrink-0"
+      >
+        {isSelected ? (
+          <CheckCircle2 className="h-5 w-5 text-blue-600" />
+        ) : (
+          <Circle className="h-5 w-5 text-neutral-300" />
+        )}
+      </button>
+
+      <div className="min-w-0 flex-1">
+        <p className="font-medium leading-snug text-neutral-950">{dataset.name}</p>
+        <p className="mt-1 text-xs text-neutral-500">
+          {dataset.provider}
+          {publishedYear !== "Unknown" ? ` · ${publishedYear}` : ""}
+        </p>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-3">
+        <MatchScoreBadge dataset={dataset} score={compatibilityScore} />
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="gap-2"
+          onClick={() => onViewDetails(dataset)}
+        >
+          <Eye className="h-4 w-4" />
+          Details
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function RoleDatasetCard({
+  dataset,
+  isSelected,
+  onToggle,
+  onViewDetails,
+}: {
+  dataset: Dataset;
+  isSelected: boolean;
+  onToggle: (dataset: Dataset) => void;
+  onViewDetails: (dataset: Dataset) => void;
+}) {
+  const compatibilityScore = getDatasetCompatibilityScore(dataset);
+  const publishedYear = extractYearFromDate(dataset.publicationDate);
+
+  return (
+    <article className={`rounded-md border bg-white p-3 shadow-sm ${isSelected ? "border-blue-500 ring-1 ring-blue-500" : "border-neutral-200"}`}>
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={() => onToggle(dataset)}
+          aria-label={isSelected ? "Deselect dataset" : "Select dataset"}
+          className="mt-1 shrink-0"
+        >
+          {isSelected ? (
+            <CheckCircle2 className="w-5 h-5 text-blue-600" />
+          ) : (
+            <Circle className="w-5 h-5 text-neutral-300" />
+          )}
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <MatchScoreBadge dataset={dataset} score={compatibilityScore} />
+          </div>
+          <h4 className="font-semibold leading-snug text-neutral-950">{dataset.name}</h4>
+          <p className="mt-1 text-xs text-neutral-500">
+            {dataset.provider}
+            {publishedYear !== "Unknown" ? ` · ${publishedYear}` : ""}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex justify-end">
+        <Button type="button" variant="outline" size="sm" className="gap-2" onClick={() => onViewDetails(dataset)}>
+          <Eye className="w-4 h-4" />
+          Details
+        </Button>
+      </div>
+    </article>
+  );
+}
+
+function MatchScoreBadge({
+  dataset,
+  score,
+}: {
+  dataset: Dataset;
+  score: number | undefined;
+}) {
+  return (
+    <span className={`inline-flex shrink-0 items-baseline gap-1 rounded-md border px-2.5 py-1 text-xs font-semibold shadow-sm ${datasetCompatibilityBadgeClass(dataset)}`}>
+      <span>Match</span>
+      <span className="text-sm leading-none">{formatDatasetCompatibilityScore(score)}</span>
+    </span>
   );
 }
 
@@ -716,11 +1114,6 @@ function DatasetTableRow({
         </button>
       </TableCell>
       <TableCell className="min-w-80 whitespace-normal">
-        {dataset.essential && (
-          <div className="mb-1 flex flex-wrap gap-1.5">
-            <Badge className="bg-blue-600">Recommended</Badge>
-          </div>
-        )}
         <p className="font-medium leading-snug">{dataset.name}</p>
         <p className="text-xs text-neutral-500">{dataset.provider}</p>
       </TableCell>

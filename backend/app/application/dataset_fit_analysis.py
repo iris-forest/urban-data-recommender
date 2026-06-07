@@ -660,7 +660,7 @@ def _build_heuristic_response(
         _build_dataset_fit_insight(item, required_roles, request)
         for item in evidence
     ]
-    insights.sort(key=lambda insight: insight.quality_score, reverse=True)
+    insights.sort(key=_review_sort_key)
 
     cross_summary = _build_cross_dataset_summary(
         request=request,
@@ -683,7 +683,7 @@ def _build_dataset_fit_insight(
     required_roles: Set[str],
     request: DatasetFitAnalysisRequest,
 ) -> DatasetFitInsight:
-    """Score one dataset and turn the evidence into user-facing guidance."""
+    """Evaluate one dataset and turn the evidence into user-facing guidance."""
     dataset = evidence.dataset
     roles = evidence.all_roles
     useful_columns = [
@@ -713,9 +713,7 @@ def _build_dataset_fit_insight(
     )
     quality_checks = _quality_checks(dataset, evidence, eda_profile)
     readiness_band = _readiness_band(quality_checks, eda_profile)
-    # Headline score matches fit_score (same as final overview); checks/readiness stay in EDA UI.
-    quality_score = fit_score
-    quality_band = _band_from_fit_score(fit_score)
+    quality_score, quality_band = _quality_score(quality_checks, readiness_band, eda_profile)
     eda_interpretation = EdaInterpretation(
         readiness_band=readiness_band,
         quality_checks=quality_checks,
@@ -818,25 +816,10 @@ def _score_fit(evidence: DatasetEvidence, required_roles: Set[str]) -> int:
     if evidence.preview.get("rows"):
         score += 5.0
 
-    score += _dataset_quality_score(evidence.dataset) * 12.0
-
     if not roles.intersection(required_roles):
         score = min(score, 32.0)
 
     return int(round(max(0.0, min(100.0, score))))
-
-
-def _dataset_quality_score(dataset: Dataset) -> float:
-    quality = dataset.quality
-    if not quality:
-        return 0.5
-    values = [
-        _normalize_quality_value(quality.completeness),
-        _normalize_quality_value(quality.timeliness),
-        _normalize_quality_value(quality.consistency),
-        _normalize_quality_value(quality.documentation),
-    ]
-    return sum(values) / len(values)
 
 
 def _normalize_quality_value(value: Any) -> float:
@@ -1049,7 +1032,7 @@ def _quality_checks(
             EdaCheckItem(
                 id="metadata_quality",
                 status="unknown",
-                message="No formal metadata quality scores were available for this dataset.",
+                message="No formal metadata quality ratings were available for this dataset.",
             )
         )
 
@@ -1084,12 +1067,15 @@ def _readiness_band(
     return "metadata_only_review"
 
 
-def _band_from_fit_score(fit_score: int) -> str:
-    if fit_score >= 75:
-        return "strong"
-    if fit_score >= 50:
-        return "usable"
-    return "limited"
+def _review_sort_key(insight: DatasetFitInsight) -> tuple[int, str]:
+    priority = {
+        "metadata_only_review": 0,
+        "usable_with_checks": 1,
+        "unknown": 2,
+        "ready_for_exploration": 3,
+    }
+    readiness = insight.eda_interpretation.readiness_band if insight.eda_interpretation else "unknown"
+    return (priority.get(readiness, 2), insight.title.lower())
 
 
 def _quality_score(
@@ -1148,8 +1134,6 @@ def _eda_synthesis(
     ]
     if caution_messages:
         parts.append(caution_messages[0])
-    elif missing:
-        parts.append(missing[0])
     band_labels = {
         "ready_for_exploration": "Data readiness: promising sample for exploration after routine checks.",
         "usable_with_checks": "Data readiness: usable with explicit checks before indicator calculation.",
@@ -1265,7 +1249,7 @@ def _recommended_workflow(insights: Sequence[DatasetFitInsight], required_roles:
     if "geographic" in roles or "geography" in required_roles:
         workflow.append("Aggregate the result to the requested geography after joins are validated.")
     if not workflow:
-        workflow.append("Use the highest-scoring dataset first, then validate joins and missing fields.")
+        workflow.append("Start with the dataset that has the clearest role, then validate joins and missing fields.")
     return workflow
 
 
@@ -1280,7 +1264,7 @@ def _merge_llm_insight_with_heuristic(
     llm_insight: DatasetFitInsight,
     heuristic_insight: DatasetFitInsight,
 ) -> DatasetFitInsight:
-    """Preserve deterministic scores and EDA; let the LLM refine narrative fields only."""
+    """Preserve deterministic role signals and EDA; let the LLM refine narrative fields only."""
     return DatasetFitInsight(
         dataset_id=heuristic_insight.dataset_id,
         title=heuristic_insight.title or llm_insight.title,
@@ -1412,7 +1396,7 @@ When writing limitations, name the missing fields or themes directly instead of 
             merged_datasets.append(_merge_llm_insight_with_heuristic(llm_item, heuristic_item))
         else:
             merged_datasets.append(llm_item)
-    response.datasets = sorted(merged_datasets, key=lambda item: item.quality_score, reverse=True)
+    response.datasets = sorted(merged_datasets, key=_review_sort_key)
 
     if not (response.cross_dataset_summary.summary or "").strip():
         response.cross_dataset_summary = heuristic_response.cross_dataset_summary

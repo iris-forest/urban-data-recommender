@@ -166,12 +166,6 @@ export interface DatasetPreviewResponse {
   message?: string | null;
 }
 
-export interface PackageManifestResponse {
-  package_name: string;
-  dataset_count: number;
-  datasets: Array<Record<string, unknown>>;
-}
-
 export interface DatasetCatalogResponse {
   datasets: DatasetItemFromAPI[];
   total_count: number;
@@ -949,25 +943,6 @@ export async function createDatasetPackage(request: PackageCreateRequest): Promi
   return response.blob();
 }
 
-/**
- * Create the same JSON manifest that is bundled inside the package zip.
- */
-export async function createDatasetPackageManifest(
-  request: PackageCreateRequest
-): Promise<PackageManifestResponse> {
-  const response = await fetch(`${API_BASE_URL}/package/manifest`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
-
-  if (!response.ok) {
-    const detail = await safeReadError(response);
-    throw new Error(detail || "Failed to create package manifest");
-  }
-
-  return response.json();
-}
 
 // =============================================================================
 // Helper Functions

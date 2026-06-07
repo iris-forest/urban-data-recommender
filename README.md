@@ -9,31 +9,49 @@ This repository contains a Vite/React frontend and a FastAPI backend for matchin
 - `docs/` - Handover notes for the next implementation pass.
 - `imports/` - Repo-local runtime output for imported API metadata. This directory is ignored by git.
 
+## Requirements
+
+- Python 3.
+- Node.js 22 with Corepack.
+- Internet access for the first dependency install and for importing source API metadata.
+
+Docker is not required for local development or Vercel frontend deployment.
+
 ## Quick Start
 
-Create and use the repository-local Python environment:
+From a fresh checkout, install backend and frontend dependencies:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r backend/requirements.txt
+./scripts/setup.sh
 ```
 
-Start the backend:
+Start both services:
+
+```bash
+./scripts/dev.sh
+```
+
+Open the URL printed by Vite, usually `http://127.0.0.1:5173`.
+
+If a default port is already occupied, override it from the repository root:
+
+```bash
+BACKEND_PORT=8001 FRONTEND_PORT=5174 ./scripts/dev.sh
+```
+
+Use pnpm for frontend installs. The tracked lockfile is `frontend/pnpm-lock.yaml`, and npm/yarn/bun lockfiles are intentionally ignored so clean environments do not accidentally install a different dependency graph.
+
+Manual startup is still available if you prefer separate terminals:
 
 ```bash
 cd backend
 ../.venv/bin/python -m uvicorn app.api:app --host 127.0.0.1 --port 8000
 ```
 
-Install and run the frontend:
-
 ```bash
 cd frontend
-pnpm install --store-dir .pnpm-store
 pnpm run dev --host 127.0.0.1
 ```
-
-Use pnpm for frontend installs. The tracked lockfile is `frontend/pnpm-lock.yaml`, and npm/yarn/bun lockfiles are intentionally ignored so clean environments do not accidentally install a different dependency graph.
 
 For a scratch or stale local frontend setup, reset the generated install artifacts and reinstall from the pnpm lockfile:
 
@@ -46,23 +64,56 @@ pnpm install --frozen-lockfile --store-dir .pnpm-store
 pnpm run build
 ```
 
-If Vite reports a missing import such as `react-markdown` or `remark-gfm`, the local `node_modules` tree was installed before the current pnpm lockfile or with the wrong package manager. Run the scratch install above, then restart Vite.
-
-Or start both services from the repository root:
-
-```bash
-./scripts/dev.sh
-```
-
-If a default port is already occupied, override it:
-
-```bash
-BACKEND_PORT=8001 FRONTEND_PORT=5174 ./scripts/dev.sh
-```
-
 `frontend/pnpm-workspace.yaml` pins pnpm's store, cache, and state directories inside the frontend folder.
 
-The frontend defaults to `http://127.0.0.1:8000` for the API. Override it with `VITE_API_BASE_URL` if needed.
+The frontend uses `/backend` in local Vite development and proxies that path to the FastAPI backend. Override `VITE_API_BASE_URL` only when pointing the frontend at a deployed API.
+
+## First-Time Setup: Import API Metadata Locally
+
+Before searching for dataset matches, import the external catalog metadata into the local backend cache. The app recommends datasets from locally cached API metadata, not from a bundled static catalog. This import stores catalog records, resource links, schema hints, and source metadata; it does not download every raw dataset file up front.
+
+### Import From The Frontend
+
+1. Start the backend and frontend.
+2. Open the frontend in your browser.
+3. On the first screen, select the **Data sources** tab.
+4. Choose a source, such as **Madrid CKAN** or **datos.gob.es**.
+5. Click **Import full catalog**.
+6. Watch the status and progress on the same card. You can stay on the page or return later; the frontend polls the backend for progress.
+7. When the card shows the source is saved locally / completed, return to the planning question tab and run the normal recommendation flow.
+
+Supported full-catalog imports:
+
+- Madrid CKAN: `madrid-ckan`
+- datos.gob.es: `datos-gob-es`
+
+Use **Quick sync** only for a smaller interactive import. For normal local use, prefer **Import full catalog** so recommendations can search the full locally cached metadata.
+
+If raw snapshots already exist, click **Rebuild from saved source files** in the source card. This regenerates normalized cache records without refetching the source API.
+
+To remove one source from the active recommendation catalog, click **Clear imported data** on that source card. This clears the active imported records, but historical import output can remain on disk for inspection.
+
+To inspect what was imported, click **View imported datasets** on the source card.
+
+### Local Cache Notes
+
+Local cache locations:
+
+- `backend/data/cache/raw/` - raw paginated source snapshots.
+- `backend/data/cache/normalized/` - normalized JSONL dataset records used by recommendations.
+- `backend/data/cache/manifest.json` - import progress and cache status.
+- `imports/` - repo-local metadata output for inspection.
+
+## App Workflow
+
+1. **Import API metadata locally** from the **Data sources** tab.
+2. **Describe the planning indicator** in natural language.
+3. **Review matching datasets** on the Role Board. The visible `Match` value describes role usefulness for the question; it does not claim the dataset is analysis-ready.
+4. **Select datasets for the indicator roles**. The board groups datasets by the role they can play, such as green-space input, population denominator, or low-emission context.
+5. **Run Data Quality Review**. This page does not show a numeric quality score. It shows a review status such as `Needs review`, `Source check needed`, or `No major issues`, plus concrete next steps.
+6. **Export or download outputs** from the summary page:
+   - **Export PDF Summary** opens a print-ready summary that can be saved as PDF.
+   - **Download Data Package** creates a ZIP with the manifest, generated docs, per-dataset summaries, and source files when public resource URLs can be fetched.
 
 ## Supported Data Sources
 
@@ -115,32 +166,19 @@ See `docs/handover-next-steps.md` for the current pickup list and implementation
 
 ## Deployment
 
-### Docker Compose (recommended for reproducible runs)
+The deployment shape is one FastAPI backend service plus one static frontend build. The frontend can run on Vercel, Render Static Site, Netlify, or any static host. The backend should run on a Python service host such as Render Web Service, Fly.io, Railway, AWS, or a university/internal server.
 
-From the repository root:
+### Vercel Frontend
 
-```bash
-docker compose up --build
-```
+Vercel does not need Docker for this project. Deploy only `frontend/` as a Vite static app:
 
-- App UI: http://localhost:8080
-- API health (via nginx proxy): http://localhost:8080/backend/health
+- **Root directory:** `frontend`
+- **Install command:** `corepack enable && corepack prepare pnpm@11.0.5 --activate && pnpm install --frozen-lockfile`
+- **Build command:** `pnpm run build`
+- **Output directory:** `dist`
+- **Environment:** `VITE_API_BASE_URL=https://your-backend.example.com`
 
-The frontend image uses Node 22, enables pnpm 11.0.5 through Corepack, installs with `pnpm install --frozen-lockfile`, and runs `pnpm run build` before copying the static output into nginx. To build only the frontend image, run `docker compose build frontend` from the repository root. If you use plain Docker, keep the repository root as the build context: `docker build -f frontend/Dockerfile .`.
-
-The stack runs a FastAPI backend and an nginx frontend. The UI calls `/backend/...`, which nginx proxies to the API (same pattern as local Vite dev). Persistent data is stored in Docker volumes (`backend_data`, `hf_cache`) and `./imports`.
-
-**Catalog cache in the image:** If `backend/data/cache/` exists on the host when you build (after a local full-catalog import), it is copied into the backend image and seeded into the `backend_data` volume on first container start. You do not need to click “Import full catalog” for Madrid CKAN / datos.gob.es when that cache is present. Rebuild the backend image after refreshing the local cache. If an old empty volume already exists, reset it once: `docker compose down -v && docker compose up --build`.
-
-Optional environment overrides:
-
-```bash
-cp compose.env.example compose.env
-# edit compose.env, then:
-docker compose --env-file compose.env up --build
-```
-
-Budget roughly 2–4 GB RAM for the backend container when `sentence-transformers` loads. The Docker build context includes the catalog cache files and can be large (hundreds of MB).
+Configure backend `CORS_ORIGINS` to include the deployed Vercel frontend origin.
 
 ### Render (static frontend)
 
@@ -157,4 +195,4 @@ corepack enable && corepack prepare pnpm@11.0.5 --activate && pnpm install --fro
 
 ### Manual deployment
 
-The deployment shape is one FastAPI backend service plus one static frontend build. Build the frontend with `pnpm run build`, host `frontend/dist/`, and set `VITE_API_BASE_URL` to the deployed backend URL. Configure backend `CORS_ORIGINS` for the deployed frontend origin.
+Build the frontend with `pnpm run build`, host `frontend/dist/`, and set `VITE_API_BASE_URL` to the deployed backend URL. Configure backend `CORS_ORIGINS` for the deployed frontend origin.
