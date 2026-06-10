@@ -163,36 +163,3 @@ pnpm run build
 ```
 
 See `docs/handover-next-steps.md` for the current pickup list and implementation notes.
-
-## Deployment
-
-The deployment shape is one FastAPI backend service plus one static frontend build. The frontend can run on Vercel, Render Static Site, Netlify, or any static host. The backend should run on a Python service host such as Render Web Service, Fly.io, Railway, AWS, or a university/internal server.
-
-### Vercel Frontend
-
-Vercel does not need Docker for this project. Deploy only `frontend/` as a Vite static app:
-
-- **Root directory:** `frontend`
-- **Install command:** `corepack enable && corepack prepare pnpm@11.0.5 --activate && pnpm install --frozen-lockfile`
-- **Build command:** `pnpm run build`
-- **Output directory:** `dist`
-- **Environment:** `VITE_API_BASE_URL=https://your-backend.example.com`
-
-Configure backend `CORS_ORIGINS` to include the deployed Vercel frontend origin.
-
-### Render (static frontend)
-
-For a Render **Static Site** rooted at `frontend/`:
-
-- **Environment:** `NODE_VERSION=22`, `VITE_API_BASE_URL=https://your-api.onrender.com`
-- **Build command:**
-
-```bash
-corepack enable && corepack prepare pnpm@11.0.5 --activate && pnpm install --frozen-lockfile && pnpm run build
-```
-
-`package.json` pins `packageManager` to pnpm 11 so the lockfile matches CI/Render (avoids override mismatch on older pnpm).
-
-### Manual deployment
-
-Build the frontend with `pnpm run build`, host `frontend/dist/`, and set `VITE_API_BASE_URL` to the deployed backend URL. Configure backend `CORS_ORIGINS` for the deployed frontend origin.
